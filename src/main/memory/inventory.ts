@@ -17,6 +17,9 @@ function nativeMemoryPaths(projectPath: string, agentId: AgentId): string[] {
   if (agentId === "codex") {
     return [path.join(projectPath, "AGENTS.md")];
   }
+  if (agentId === "workbuddy") {
+    return [path.join(projectPath, "CODEBUDDY.md")];
+  }
   return [];
 }
 
@@ -111,7 +114,7 @@ export class MemoryInventory {
     if (row) return this.rowToDto(row);
     if (!id.startsWith("native:")) return null;
     for (const project of this.registry.listProjects()) {
-      for (const agentId of ["claude-code", "codex"] as const) {
+      for (const agentId of ["claude-code", "codex", "workbuddy"] as const) {
         for (const source of nativeMemoryPaths(project.path, agentId)) {
           const nativeId = "native:" + crypto.createHash("sha256").update(source).digest("hex");
           if (nativeId !== id) continue;

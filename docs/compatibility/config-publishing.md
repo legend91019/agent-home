@@ -4,7 +4,8 @@
 
 - Claude Code：规则或用户选择的知识发布到项目 `CLAUDE.md`；skill 发布到 `.claude/skills/<name>/`。[官方 skills 路径](https://code.claude.com/docs/en/skills)
 - Codex：规则或用户选择的知识发布到项目 `AGENTS.md`；skill 发布到 `.agents/skills/<name>/`。[官方 skills 路径](https://learn.chatgpt.com/docs/build-skills)
-- Antigravity、ZCode、WorkBuddy 的目标路径未在此发布器验证，预览显示 `publishable:false` 及原因；不会创建猜测的 `.antigravity.md` 等文件。
+- WorkBuddy：项目指令或用户选择的知识发布到 `CODEBUDDY.md`；skill 发布到 `.codebuddy/skills/<name>/`。[官方项目路径](https://www.workbuddy.ai/docs/cli/large-codebases)
+- Antigravity、ZCode 的目标路径未在此发布器验证，预览显示 `publishable:false` 及原因；不会创建猜测的 `.antigravity.md` 等文件。
 
 发布器只负责复制已选择的配置与资源。它不会执行 skill 脚本，也不承诺跨工具的扩展字段具有相同语义。
 

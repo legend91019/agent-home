@@ -89,6 +89,15 @@ describe("MemoryInventory + MemoryTransfer", () => {
     expect(fs.readFileSync(path.join(dir, ".agent-workbench", "memory", "codex.md"), "utf8")).toContain("只在本项目修改登录模块");
   });
 
+  it("WorkBuddy 的项目指令可作为用户选择的记忆来源", () => {
+    fs.writeFileSync(path.join(dir, "CODEBUDDY.md"), "只使用项目批准的依赖", "utf8");
+    const source = inventory.listVisibleMemories("p1", "workbuddy");
+    expect(source).toHaveLength(1);
+    expect(source[0]).toMatchObject({ agentId: "workbuddy", originalText: "只使用项目批准的依赖" });
+    const diff = transfer.previewMemoryTransfer([source[0].id], "codex", "project_guidance");
+    expect(diff.previewText).toContain("只使用项目批准的依赖");
+  });
+
   it("未知来源条目不能生成空白转移", () => {
     expect(() => transfer.previewMemoryTransfer(["unknown"], "codex", "project_guidance")).toThrow("记忆条目不可用");
   });

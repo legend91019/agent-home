@@ -1,10 +1,10 @@
 {
-  "name": "agent-workbench",
-  "productName": "Agent Workbench",
+  "name": "agent-home",
+  "productName": "agent-home",
   "version": "0.1.0",
   "description": "本地 Agent 工作台：在项目内管理多个编码 Agent 的共享配置、记忆互转、完整对话交接、顺序与并行任务、审查合并及有来源标记的统计。",
   "license": "MIT",
-  "author": "Agent Workbench",
+  "author": "agent-home contributors",
   "main": ".vite/build/electron-main.cjs",
   "scripts": {
     "dev": "electron-forge start",

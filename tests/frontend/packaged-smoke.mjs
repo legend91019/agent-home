@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const executablePath = resolve("out", "Agent Workbench-win32-x64", "agent-workbench.exe");
-const dataDir = mkdtempSync(join(tmpdir(), "agent-workbench-smoke-"));
+const executablePath = resolve("out", "agent-home-win32-x64", "agent-home.exe");
+const dataDir = mkdtempSync(join(tmpdir(), "agent-home-smoke-"));
 let app;
 try {
   app = await electron.launch({
@@ -13,7 +13,7 @@ try {
     timeout: 30_000,
   });
   const window = await app.firstWindow({ timeout: 30_000 });
-  await window.getByText("Agent Workbench", { exact: true }).waitFor({ timeout: 15_000 });
+  await window.getByText("agent-home", { exact: true }).waitFor({ timeout: 15_000 });
   await window.getByRole("button", { name: "项目", exact: true }).click();
   await window.getByRole("heading", { name: "项目" }).waitFor();
   const project = await window.evaluate(
@@ -29,7 +29,7 @@ try {
   await app?.close();
   const resolvedTemp = resolve(tmpdir());
   const resolvedData = resolve(dataDir);
-  if (!resolvedData.startsWith(resolvedTemp + "\\") || !resolvedData.includes("agent-workbench-smoke-")) {
+  if (!resolvedData.startsWith(resolvedTemp + "\\") || !resolvedData.includes("agent-home-smoke-")) {
     throw new Error("Smoke test temporary directory is outside the expected root");
   }
   rmSync(resolvedData, { recursive: true, force: true });

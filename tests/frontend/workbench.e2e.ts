@@ -8,6 +8,7 @@ test.beforeEach(async ({ page }) => {
     let removed = false;
     let workflow: any;
     let conflict = true;
+    let workbuddyImported = false;
     (window as any).calls = [];
     (window as any).api = new Proxy({}, { get: (_, channel) => async (input: any) => {
       (window as any).calls.push({channel,input});
@@ -21,7 +22,8 @@ test.beforeEach(async ({ page }) => {
         {artifactId:'skill-2',kind:'skill',sourcePath:'D:/test/skill/SKILL.md',path:'D:/test/.agents/skills/skill/SKILL.md',status:'new',publishable:false,reason:'来源不安全'},
       ]};
       if(channel==='config.publish') return {id:'receipt-1',diffId:input.diffId,appliedChoices:input.choices};
-      if(channel==='sessions.list') return [session];
+      if(channel==='sessions.list') return input.agentId==='workbuddy' ? (workbuddyImported ? [{agentId:'workbuddy',id:'import-1',title:'WorkBuddy 导入会话',messageCount:2}] : []) : [session];
+      if(channel==='workbuddy.importSession'){workbuddyImported=true;return {agentId:'workbuddy',id:'import-1',title:'WorkBuddy 导入会话',messageCount:2};}
       if(channel==='handoff.create') return {id:'handoff-1'};
       if(channel==='handoff.integrity') return {readCount:1,sourceCount:1,complete:true,missing:[],largeAttachments:[],sessionRef:session};
       if(channel==='handoff.summary') return {id:'handoff-1',projectId:'p1',consumed:false};
@@ -88,6 +90,16 @@ test('选择源会话，审查原文和完整性后启动目标 Agent', async ({
   expect(calls.find((c:any) => c.channel==='handoff.create').input.session.id).toBe('session-1');
   expect(calls.find((c:any) => c.channel==='handoff.edit').input.edits).toEqual([{eventIndex:0,text:'已清理的交接内容'}]);
   expect(calls.find((c:any) => c.channel==='handoff.consume').input.targetAgentId).toBe('codex');
+});
+
+test('WorkBuddy 会话由用户指定文件后出现在当前项目列表', async ({page}) => {
+  await page.getByRole('button',{name:'对话交接',exact:true}).click();
+  await page.getByLabel('源 Agent').selectOption('workbuddy');
+  await page.getByLabel('WorkBuddy 会话文件路径').fill('D:/exports/conversation.json');
+  await page.getByRole('button',{name:'导入 WorkBuddy 会话'}).click();
+  await expect(page.getByLabel('源会话')).toContainText('WorkBuddy 导入会话');
+  const calls=await page.evaluate(()=>(window as any).calls);
+  expect(calls.find((c:any)=>c.channel==='workbuddy.importSession').input).toEqual({projectId:'p1',filePath:'D:/exports/conversation.json'});
 });
 
 test('任务正确区分不可中断运行，并显示启动错误', async ({page}) => {

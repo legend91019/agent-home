@@ -28,6 +28,8 @@ export async function handle(
       return projects.capabilities(ctx, input);
     case "sessions.list":
       return projects.listSessions(ctx, input);
+    case "workbuddy.importSession":
+      return projects.importWorkBuddySession(ctx, input);
     case "config.scan":
       return config.scanConfig(ctx, input);
     case "config.previewPublish":

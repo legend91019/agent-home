@@ -73,7 +73,7 @@ describe('ConfigPublisher safe publication', () => {
     expect(() => p.publish(d.id, { [e.artifactId]: 'manual-merge' })).toThrow(/人工合并|合并结果/);
     expect(read('AGENTS.md')).toBe('native');
   });
-  it.each([['claude-code', '.claude'], ['codex', '.agents']] as const)('publishes %s skills into the documented project path', (agent, folder) => {
+  it.each([['claude-code', '.claude'], ['codex', '.agents'], ['workbuddy', '.codebuddy']] as const)('publishes %s skills into the documented project path', (agent, folder) => {
     skill();
     const p = new ConfigPublisher(db);
     const d = p.previewPublish('p1', agent);
@@ -92,7 +92,19 @@ describe('ConfigPublisher safe publication', () => {
     expect(read('.agents/skills/my-skill/SKILL.md')).toBe('skill body');
     expect(db.getRows('SELECT * FROM publications')).toHaveLength(0);
   });
-  it.each(['antigravity', 'zcode', 'workbuddy'] as AgentId[])('does not claim an unverified %s skill path', agent => {
+  it('publishes a selected rule to WorkBuddy project instructions and restores the previous bytes', () => {
+    write('CLAUDE.md', 'shared guidance');
+    write('CODEBUDDY.md', 'existing WorkBuddy guidance');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'workbuddy');
+    const e = entry(d, 'CLAUDE.md');
+    expect(e.path).toBe(path.join(dir, 'CODEBUDDY.md'));
+    const receipt = p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    expect(read('CODEBUDDY.md')).toBe('shared guidance');
+    new ConfigPublisher(db).rollback(receipt.id);
+    expect(read('CODEBUDDY.md')).toBe('existing WorkBuddy guidance');
+  });
+  it.each(['antigravity', 'zcode'] as AgentId[])('does not claim an unverified %s skill path', agent => {
     skill();
     const p = new ConfigPublisher(db);
     const d = p.previewPublish('p1', agent);

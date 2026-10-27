@@ -60,7 +60,7 @@ export function createContext(
     adapters.register(new CodexAdapter());
     adapters.register(new AntigravityAdapter());
     adapters.register(new ZCodeAdapter());
-    adapters.register(new WorkBuddyAdapter());
+    adapters.register(new WorkBuddyAdapter({ dataDir }));
   }
 
   const config = new ConfigInventory(db);

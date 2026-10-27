@@ -1,5 +1,5 @@
 /**
- * Electron 主进程入口（Agent Workbench）。
+ * Electron 主进程入口（agent-home）。
  * 职责：窗口生命周期、单实例锁、squirrel 启动处理，以及把全部 IPC 通道
  * 委托给 src/main/ipc 的 handle() —— 业务逻辑不在此处，只在边界做错误收敛。
  *

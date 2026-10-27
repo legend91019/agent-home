@@ -204,7 +204,7 @@ export class MergeService {
         }
         const output = `${merged.stdout ?? ""}\n${merged.stderr ?? ""}`;
         if (!/Already up to date/i.test(output)) {
-          this.runGit(["-C", tempPath, "-c", "user.name=Agent Workbench", "-c", "user.email=workbench@local.invalid", "commit", "--no-edit", "--no-verify", "-m", `probe ${branch}`]);
+          this.runGit(["-C", tempPath, "-c", "user.name=agent-home", "-c", "user.email=agent-home@local.invalid", "commit", "--no-edit", "--no-verify", "-m", `probe ${branch}`]);
         }
       }
       return [];
@@ -323,7 +323,7 @@ export class MergeService {
           this.runGit([
             "-C",
             tempPath,
-            "-c", "user.name=Agent Workbench",
+            "-c", "user.name=agent-home",
             "-c", "user.email=workbench@local.invalid",
             "commit",
             "--no-edit",

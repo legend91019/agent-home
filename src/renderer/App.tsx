@@ -120,7 +120,7 @@ export function App(): JSX.Element {
         }}
       >
         <div style={{ color: "#f5c2e7", fontWeight: 700, marginBottom: 12 }}>
-          Agent Workbench
+          agent-home
         </div>
         {NAV.map((n) => (
           <button
@@ -375,6 +375,7 @@ function TasksView(props: { projectId: string; disabled: boolean }): JSX.Element
 
 function HandoffsView(props: { projectId: string; disabled: boolean }): JSX.Element {
   const [source, setSource] = useState<AgentId>("claude-code");
+  const [workbuddyFile, setWorkbuddyFile] = useState("");
   const [sessions, setSessions] = useState<SessionRef[]>([]);
   const [sessionId, setSessionId] = useState("");
   const [id, setId] = useState("");
@@ -423,6 +424,16 @@ function HandoffsView(props: { projectId: string; disabled: boolean }): JSX.Elem
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
+  const importWorkBuddy = async () => {
+    setBusy(true); setError(""); setResult("");
+    try {
+      await call("workbuddy.importSession", { projectId: props.projectId, filePath: workbuddyFile.trim() });
+      setWorkbuddyFile("");
+      setSessionRefresh((count) => count + 1);
+      setResult("会话已导入当前项目，请从源会话列表中选择并审查。");
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
   const consume = async () => {
     if (!id || !reviewed || !report) return;
     setBusy(true); setError(""); setResult("");
@@ -451,6 +462,11 @@ function HandoffsView(props: { projectId: string; disabled: boolean }): JSX.Elem
       <label>源 Agent <select aria-label="源 Agent" style={inputStyle} value={source} disabled={busy} onChange={(e) => setSource(e.target.value as AgentId)}>
         {AGENTS.map((a) => <option key={a} value={a}>{a}</option>)}
       </select></label>
+      {source === "workbuddy" && <div style={{ marginTop: 12 }}>
+        <p>WorkBuddy 桌面实时会话暂不能直接读取。准备符合兼容格式的可见消息 JSON/JSONL 文件后，在这里输入路径并导入本机私有副本。</p>
+        <input aria-label="WorkBuddy 会话文件路径" style={{ ...inputStyle, minWidth: 360 }} value={workbuddyFile} disabled={busy} onChange={(e) => setWorkbuddyFile(e.target.value)} placeholder="D:/exports/conversation.json" />
+        <button style={btn} disabled={busy || !workbuddyFile.trim()} onClick={importWorkBuddy}>导入 WorkBuddy 会话</button>
+      </div>}
       <label>源会话 <select aria-label="源会话" style={{ ...inputStyle, maxWidth: 420 }} value={sessionId} disabled={busy} onChange={(e) => { setSessionId(e.target.value); setId(""); setReport(null); setEvents([]); setReviewed(false); setResult(""); }}>
         <option value="">请选择会话</option>
         {sessions.map((s) => <option key={s.id} value={s.id}>{s.title || s.id} · {s.messageCount} 条</option>)}

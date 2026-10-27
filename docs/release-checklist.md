@@ -18,7 +18,7 @@
 - 在安装版完成一次“项目登记 → 交接审查 → 目标任务 → 关闭重启 → 状态恢复”流程，确认应用数据保留。
 - 在目标系统上验证 Squirrel 安装、升级和卸载行为；确认卸载不删除项目文件和 Agent 原生配置。
 - 对大规模历史、长工具输出和 125% Windows 缩放做性能与可用性走查。
-- 对 Antigravity、ZCode、WorkBuddy 分别做实际版本兼容性验证后再提升能力等级。
+- 对 Antigravity、ZCode 分别做实际版本兼容性验证；WorkBuddy 继续验证桌面会话、任务接口及项目配置加载行为，详见 [兼容性说明](compatibility/workbuddy.md)。
 
 ## 发布判定
 

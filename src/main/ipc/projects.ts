@@ -1,6 +1,7 @@
 import { AppContext } from "../services";
 import { ProjectDTO, CapabilityReport, SessionRef, AgentId } from "../../shared/contracts";
 import { WorkbenchError } from "../../shared/errors";
+import { WorkBuddyAdapter } from "../adapters/workbuddy";
 
 export async function listProjects(ctx: AppContext): Promise<ProjectDTO[]> {
   return ctx.projects.listProjects();
@@ -37,4 +38,18 @@ export async function listSessions(
   if (!p) throw new WorkbenchError("invalid_data", "项目不存在");
   const adapter = ctx.adapters.get(input.agentId);
   return adapter.listSessions(p.path);
+}
+
+export async function importWorkBuddySession(
+  ctx: AppContext,
+  input: { projectId: string; filePath: string },
+): Promise<SessionRef> {
+  const project = ctx.projects.getProject(input.projectId);
+  if (!project) throw new WorkbenchError("invalid_data", "项目不存在");
+  if (typeof input.filePath !== "string" || !input.filePath.trim())
+    throw new WorkbenchError("invalid_data", "请选择要导入的 WorkBuddy 会话文件");
+  const adapter = ctx.adapters.get("workbuddy");
+  if (!(adapter instanceof WorkBuddyAdapter))
+    throw new WorkbenchError("unsupported_version", "WorkBuddy 适配器不可用");
+  return adapter.importSession(project.path, input.filePath);
 }

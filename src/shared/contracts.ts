@@ -446,6 +446,7 @@ export interface IpcContract {
   "projects.get": { input: { id: string }; output: ProjectDTO | null };
   "projects.capabilities": { input: { projectId: string }; output: CapabilityReport[] };
   "sessions.list": { input: { projectId: string; agentId: AgentId }; output: SessionRef[] };
+  "workbuddy.importSession": { input: { projectId: string; filePath: string }; output: SessionRef };
   "config.scan": { input: { projectId: string }; output: SharedArtifactDTO[] };
   "config.previewPublish": {
     input: { projectId: string; targetAgentId: AgentId };
@@ -517,6 +518,7 @@ export const IPC_CHANNELS = [
   "projects.get",
   "projects.capabilities",
   "sessions.list",
+  "workbuddy.importSession",
   "config.scan",
   "config.previewPublish",
   "config.publish",

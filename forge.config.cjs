@@ -4,8 +4,8 @@ const { VitePlugin } = require("@electron-forge/plugin-vite");
 module.exports = {
   packagerConfig: {
     asar: true,
-    name: "Agent Workbench",
-    executableName: "agent-workbench",
+    name: "agent-home",
+    executableName: "agent-home",
   },
   rebuildConfig: {},
   makers: [

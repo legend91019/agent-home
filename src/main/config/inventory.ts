@@ -11,7 +11,7 @@ import { ProjectRegistry } from "../projects/registry";
 import { WorkbenchError } from "../../shared/errors";
 import type { ArtifactScope, SharedArtifactDTO } from "../../shared/contracts";
 
-const RULE_FILES = ["CLAUDE.md", "AGENTS.md", "GEMINI.md"];
+const RULE_FILES = ["CLAUDE.md", "AGENTS.md", "GEMINI.md", "CODEBUDDY.md"];
 
 interface UpsertInput {
   projectId: string;

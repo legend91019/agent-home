@@ -164,6 +164,8 @@ export class ConfigPublisher {
         return path.join(root, '.claude', 'skills', artifact.name);
       if (agent === 'codex')
         return path.join(root, '.agents', 'skills', artifact.name);
+      if (agent === 'workbuddy')
+        return path.join(root, '.codebuddy', 'skills', artifact.name);
       return null;
     }
     if (artifact.kind === 'workflow')
@@ -172,6 +174,8 @@ export class ConfigPublisher {
       return path.join(root, 'CLAUDE.md');
     if (agent === 'codex')
       return path.join(root, 'AGENTS.md');
+    if (agent === 'workbuddy')
+      return path.join(root, 'CODEBUDDY.md');
     return null;
   }
   private baseline(agent: AgentId, target: string): string | null {
@@ -194,7 +198,7 @@ export class ConfigPublisher {
       groups.set(artifact.id, group);
     }
     return [...groups.values()].map(group => {
-      const shared = group.filter(a => !within(path.join(root, '.claude', 'skills'), a.sourcePath!) && !within(path.join(root, '.agents', 'skills'), a.sourcePath!));
+      const shared = group.filter(a => !within(path.join(root, '.claude', 'skills'), a.sourcePath!) && !within(path.join(root, '.agents', 'skills'), a.sourcePath!) && !within(path.join(root, '.codebuddy', 'skills'), a.sourcePath!));
       const candidates = shared.length ? shared : group;
       return { artifact: candidates[0], ambiguous: candidates.length > 1 };
     });

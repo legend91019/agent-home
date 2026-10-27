@@ -139,7 +139,7 @@ export async function connectCodex(command = "codex", cwd?: string, args = ["app
     child.stdin.on("error", exit);
     const close = () => { lines.close(); child.kill(); protocol.onProcessExit(); };
     try {
-        await protocol.request("initialize", { clientInfo: { name: "agent_workbench", title: "Agent Workbench", version: "0.1.0" } });
+        await protocol.request("initialize", { clientInfo: { name: "agent_home", title: "agent-home", version: "0.1.0" } });
         child.stdin.write(`${JSON.stringify({ method: "initialized", params: {} })}\n`);
         return { pid: child.pid, request: (method, params) => protocol.request(method, params), onNotification: fn => protocol.onNotification(fn), close };
     }

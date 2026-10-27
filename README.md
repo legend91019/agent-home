@@ -1,20 +1,20 @@
-# Agent Workbench
+# agent-home
 
 **在一个项目里查看、交接和协调自己的编码 Agent。**
 
-Agent Workbench 是面向个人的 Windows 本地桌面工作台。它把项目、Agent 能力、规则与 skills、记忆指导、可见对话、任务和 Git 工作区放在同一个面板中，让用户决定何时共享配置、何时把任务交给另一个 Agent，以及何时合并并行工作的结果。
+agent-home 是面向个人的 Windows 本地桌面工作台。它把项目、Agent 能力、规则与 skills、记忆指导、可见对话、任务和 Git 工作区放在同一个面板中，让用户决定何时共享配置、何时把任务交给另一个 Agent，以及何时合并并行工作的结果。
 
-项目与 [TeamAI](https://github.com/Tencent/teamai-cli) 都涉及 Agent 的规则和 skills 管理；Agent Workbench 当前聚焦**个人本机、项目范围和运行中的跨 Agent 协作**。首版深入适配 Claude Code 与 Codex。Antigravity、ZCode 和 WorkBuddy 已有适配器骨架及部分手工导出解析能力，实时会话和任务控制仍待逐一验证。
+项目与 [TeamAI](https://github.com/Tencent/teamai-cli) 都涉及 Agent 的规则和 skills 管理；agent-home 当前聚焦**个人本机、项目范围和运行中的跨 Agent 协作**。首版深入适配 Claude Code 与 Codex；WorkBuddy 已接入安装探测、项目规则和 skills 发布，以及用户主动选择的会话文件导入。Antigravity、ZCode 仍是适配器骨架。
 
-> **当前状态：Windows 0.1.0 候选版。** 已通过离线测试、浏览器界面测试和打包应用启动检查；尚未完成真实付费模型任务、安装升级与卸载的人工验收。Claude Code 与 Codex 的未验证操作会标为降级或未知；另外三个适配器尚未实现真实安装探测。
+> **当前状态：Windows 0.1.0 候选版。** 已通过离线测试、浏览器界面测试和打包应用启动检查；尚未完成真实付费模型任务、安装升级与卸载的人工验收。Claude Code 与 Codex 的未验证操作会标为降级或未知。WorkBuddy 的桌面实时会话和任务控制未接入。
 
 ## 这个项目解决什么问题
 
 个人同时使用多个编码 Agent 时，同一个项目的信息会分散在各自的规则文件、skill 目录和会话中。切换工具经常意味着重新解释背景，多个 Agent 同时改仓库又容易互相覆盖。
 
-Agent Workbench 以**项目**为主要工作范围，提供一条由用户控制的协作链：
+agent-home 以**项目**为主要工作范围，提供一条由用户控制的协作链：
 
-1. 登记本地项目，查看 Claude Code、Codex 的实际能力和其他 Agent 的待验证状态。
+1. 登记本地项目，查看 Claude Code、Codex、WorkBuddy 的能力报告和其他 Agent 的待验证状态。
 2. 扫描已有规则和 skills，预览差异后选择是否发布到目标 Agent。
 3. 选择记忆来源和用途，将内容发布为工作台管理的项目指导或任务上下文。
 4. 从源 Agent 的可见会话建立交接包，检查完整性与敏感提示，编辑交接副本后启动目标 Agent 的新任务。
@@ -39,7 +39,7 @@ npm ci
 npm run dev
 ```
 
-首次打开后，在「项目」页输入本地项目目录并登记，点击项目卡片选中它。随后可在「任务」「对话交接」「共享配置」等页面操作。Antigravity、ZCode、WorkBuddy 当前显示未接入状态；这不代表它们在用户电脑上一定没有安装。
+首次打开后，在「项目」页输入本地项目目录并登记，点击项目卡片选中它。随后可在「任务」「对话交接」「共享配置」等页面操作。WorkBuddy 在 Windows 上通过安装记录检测；Antigravity、ZCode 仍显示待接入状态。
 
 想生成安装包时，执行 `npm run make`。Windows Squirrel 安装程序与 zip 会输出到 `out/make/`；该目录不纳入 Git。当前仓库没有通过 GitHub Release 发布预编译安装包。
 
@@ -52,15 +52,27 @@ npm run dev
 
 交接包保留适配器**能够取得的完整可见历史**，包括用户、助手和工具事件；隐藏推理不会读取。完整性取决于适配器支持的消息类型：不可读取的附件会标明缺失，未知事件格式会使交接失败。目标任务收到一个本机 UTF-8 历史文件路径和读取指令。能否完整读取该文件仍受目标 Agent 权限、上下文窗口及实际运行环境影响。
 
+### WorkBuddy 项目接入
+
+在「共享配置」中选择 WorkBuddy 作为发布目标，可把用户选中的规则或知识文件发布到项目 `CODEBUDDY.md`，把选中的 skill 发布到 `.codebuddy/skills/<name>/`。发布前会预览目标和冲突；发布记录支持回滚。记忆互转也能把项目 `CODEBUDDY.md` 作为可见来源。相关路径依据 [CodeBuddy 项目指令与 skills 文档](https://www.workbuddy.ai/docs/cli/large-codebases)；应用不会读写 WorkBuddy 桌面版的私有记忆库。
+
+若要把 WorkBuddy 对话交给 Claude Code 或 Codex，在「对话交接」选择 `workbuddy`，输入**自己准备的完整可见消息 JSON/JSONL 文件路径**并点击导入。文件需要是消息数组，或 `{ "messages": [...] }` / `{ "turns": [...] }`；每条消息包含 `role`（`user`、`assistant`、`system`）和字符串或内容块数组形式的 `content`。导入会保存到应用本机数据目录的项目隔离副本；之后按通常流程审查、编辑交接副本并启动目标 Agent。解析器保留完整文本和工具输入输出，遇到无法识别的内容块会报错，避免静默丢失历史。当前没有经验证的 WorkBuddy 桌面会话导出格式或实时读取接口，因此此入口只保证兼容上述结构化文件，**不能宣称自动导出桌面会话**。
+
+最小文件示例：
+
+```json
+{"messages":[{"role":"user","content":"请检查登录流程"},{"role":"assistant","content":"已检查登录流程并完成修改。"}]}
+```
+
 ## 功能概览
 
 | 面板 | 当前可以做什么 | 操作边界 |
 | --- | --- | --- |
-| 项目 | 登记本地目录，选择项目，查看 Claude Code、Codex 的能力探测与其他适配器的接入状态 | 能力按项目和当前工具环境判断，不把“已安装”当作“全部能力可用” |
+| 项目 | 登记本地目录，选择项目，查看 Claude Code、Codex、WorkBuddy 的能力探测与其他适配器的接入状态 | 能力按项目和当前工具环境判断，不把“已安装”当作“全部能力可用” |
 | 任务 | 创建项目任务，查看 Run 状态；对有原生控制句柄的 Run 发起中断 | 真实启动与中断取决于适配器能力；应用重启后不能控制已丢失的原生句柄 |
 | 对话交接 | 读取项目会话，存储来源快照，检查完整性与敏感提示，编辑交接副本，启动目标新任务 | 仅转移可见内容；附件若不可读取会标明缺失，不会静默补全 |
-| 共享配置 | 扫描规则、知识文件和 skills；按来源逐项预览、选择并发布 | 当前只验证 Claude Code 与 Codex 的原生发布路径；冲突与来源漂移会阻止覆盖 |
-| 记忆互转 | 选择来源 Agent、目标 Agent 与用途，预览后发布指导文件 | 当前来源为项目内 Claude Code 的 `CLAUDE.md`、`.claude/CLAUDE.md`、Codex 的 `AGENTS.md` 及已导入条目；不改写目标 Agent 的原生自动记忆 |
+| 共享配置 | 扫描规则、知识文件和 skills；按来源逐项预览、选择并发布 | 已接入 Claude Code、Codex 和 WorkBuddy 的项目发布路径；冲突与来源漂移会阻止覆盖 |
+| 记忆互转 | 选择来源 Agent、目标 Agent 与用途，预览后发布指导文件 | 来源包括 Claude Code 的 `CLAUDE.md`、`.claude/CLAUDE.md`、Codex 的 `AGENTS.md`、WorkBuddy 的 `CODEBUDDY.md` 及已导入条目；不改写原生自动记忆 |
 | 工作流 | 编辑顺序或并行节点、依赖、Agent、指令和人工审查门；暂停、恢复、批准、重试 | 写仓库节点使用独立 worktree；需要用户根据状态推进和审查 |
 | 合并审查 | 查看分支、基线与冲突，拒绝或应用无冲突提案 | 分支改动须先提交，目标工作区须干净；应用结果暂存但不自动提交或推送 |
 | 用量统计 | 已有 token 与 skill 调用证据的聚合逻辑；配置扫描后可显示已发现 skill | 真实运行事件的自动摄入及用户导入入口尚未接入；日常使用时 token 和调用次数通常为未知或无记录 |
@@ -72,9 +84,10 @@ npm run dev
 | --- | --- | --- |
 | Claude Code | 本地 JSONL 会话列表与可见历史；通过 CLI 创建托管任务；项目 `CLAUDE.md` 与 `.claude/skills/` 发布 | 会话解析与任务生命周期经过夹具、伪 CLI 测试；未在本项目发起真实付费任务；不声明精确用量或中断能力 |
 | Codex | app-server 会话列表与可见历史；新建或恢复任务；托管运行中断；项目 `AGENTS.md` 与 `.agents/skills/` 发布 | 本机只读会话验证及伪服务测试通过；任务启动和中断仍标为降级，未执行真实付费模型调用 |
-| Antigravity、ZCode、WorkBuddy | 适配器骨架和部分本地导出 JSON/JSONL 解析函数 | 尚无真实安装探测；面板中的实时会话、原生配置发布和任务控制未验证，不显示为已支持 |
+| WorkBuddy | Windows 安装探测；`CODEBUDDY.md` 和 `.codebuddy/skills/` 项目发布；用户指定的 JSON/JSONL 会话导入 | 桌面实时会话和任务控制未验证；导入格式限上文所述结构化消息，具体见[兼容性说明](docs/compatibility/workbuddy.md) |
+| Antigravity、ZCode | 适配器骨架和部分本地导出解析函数 | 尚无真实安装探测；面板中的实时会话、原生配置发布和任务控制未验证 |
 
-配置扫描会发现项目根目录的 `CLAUDE.md`、`AGENTS.md`、`GEMINI.md`、`.agent-workbench/knowledge.md`，以及项目中包含 `SKILL.md` 的目录。**发现不等于发布或调用。** 若多个来源映射同一目标，发布时只能选一个；`manual-merge` 目前没有交互式合并结果输入，需在外部处理后重新预览。详情见[配置发布安全约定](docs/compatibility/config-publishing.md)。
+配置扫描会发现项目根目录的 `CLAUDE.md`、`AGENTS.md`、`GEMINI.md`、`CODEBUDDY.md`、`.agent-workbench/knowledge.md`，以及项目中包含 `SKILL.md` 的目录。**发现不等于发布或调用。** 若多个来源映射同一目标，发布时只能选一个；`manual-merge` 目前没有交互式合并结果输入，需在外部处理后重新预览。详情见[配置发布安全约定](docs/compatibility/config-publishing.md)。
 
 ## 工作方式与数据流
 
@@ -87,6 +100,7 @@ flowchart LR
     CORE --> GIT[Git worktree 与合并提案]
     ADAPTER --> CLAUDE[Claude Code CLI / 本地会话]
     ADAPTER --> CODEX[Codex app-server / 本地会话]
+    ADAPTER --> WORKBUDDY[WorkBuddy 项目配置 / 手工会话导入]
     CORE --> PROJECT[项目中的工作台指导与配置备份]
 ```
 
@@ -96,10 +110,12 @@ flowchart LR
 
 | 位置 | 存放内容 |
 | --- | --- |
-| `%LOCALAPPDATA%/AgentWorkbench` | 默认本机数据目录，包括 SQLite、交接历史文件、内容存储和应用管理的 worktree；可用 `AGENT_WORKBENCH_DATA_DIR` 覆盖 |
+| `%LOCALAPPDATA%/AgentWorkbench` | 默认本机数据目录，包括 SQLite、交接历史、WorkBuddy 导入副本、内容存储和应用管理的 worktree；可用 `AGENT_WORKBENCH_DATA_DIR` 覆盖 |
 | `<项目>/.agent-workbench/memory/` | 用户预览后发布的 `<agent>.md` 项目指导及 `<agent>-task.md` 任务上下文；由工作台启动的任务会收到读取路径 |
 | `<项目>/.agent-workbench/backups/` | 配置发布前的目标备份与恢复清单 |
-| Agent 原生目录 | Claude Code 与 Codex 各自管理的会话及配置；工作台只在用户选择发布时写入已验证目标 |
+| Agent 原生目录 | Claude Code、Codex 各自管理的会话及配置；WorkBuddy 的项目 `CODEBUDDY.md` 与 `.codebuddy/skills/` 在用户选择发布时写入 |
+
+`AgentWorkbench` 数据目录、项目内 `.agent-workbench/`、数据库文件名及交接包格式属于既有持久化标识。更改应用展示名时保留这些路径，确保已创建的数据和交接包继续可读；新安装也沿用同一数据位置。
 
 交接快照与原生会话之间保留来源关系。删除或编辑交接副本不会改动原生会话。工作台不扫描凭据文件，也不主动把会话历史同步到远端；目标 Agent 读取交接文件后的数据处理遵循该工具自己的服务规则，请在交接审查时清理不应分享的内容。
 
@@ -160,12 +176,12 @@ npm run smoke:package       # 启动打包应用并验证窗口、IPC、SQLite
 
 `npm run probe:adapters` 可在已安装对应 CLI 的机器上做 Claude Code、Codex 的只读能力探测。浏览器 E2E 和适配器伪服务测试不会消耗模型额度；它们不能替代真实账户下的任务验收。Electron 二进制下载若因当前网络失败，可在 PowerShell 会话中设置 `ELECTRON_MIRROR` 后重试安装和构建。
 
-本机候选版曾通过 140 项后端测试、7 项浏览器界面测试、类型检查和打包应用冒烟测试。运行环境或依赖更新后请重新执行上述命令；详细记录与未完成的人工验收见[发布检查清单](docs/release-checklist.md)。
+当前提交在本机通过 147 项后端测试、8 项浏览器界面测试、类型检查和打包应用冒烟测试。运行环境或依赖更新后请重新执行上述命令；详细记录与未完成的人工验收见[发布检查清单](docs/release-checklist.md)。
 
 ## 当前限制与后续方向
 
 - Claude Code、Codex 的真实模型启动、中断、权限交互和交接文件读取仍需在实际账户环境中验收。
-- Antigravity、ZCode、WorkBuddy 的实时适配未完成；现有手工导出解析函数不等于面板已经支持自动交接。
+- WorkBuddy 的桌面实时会话、任务启动和中断尚未接入；面板只接收用户准备的结构化可见历史文件。Antigravity、ZCode 的实时适配也未完成。
 - token 与 skill 调用证据的自动摄入和用户导入入口、完整二进制附件、长历史分页与交互式三方冲突解决尚未接入。
 - 无冲突合并要求目标与参与分支的工作区干净；工作台不会替用户提交或推送。配置多文件发布在进程被强制结束时保留备份与恢复清单，但尚无自动恢复。
 - 已生成 Windows 安装包，但目标机器上的安装、升级和卸载流程仍待人工验证。

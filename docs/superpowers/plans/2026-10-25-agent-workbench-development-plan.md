@@ -1,4 +1,4 @@
-# Agent Workbench Implementation Plan
+# agent-home Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
@@ -86,7 +86,7 @@
 **Interfaces:** 产出 npm run dev、npm run typecheck、npm test、npm run e2e、npm run make；所有后续任务依赖该构建入口。
 
 - [ ] Step 1：在空工作区初始化 Git 和 Electron Forge + Vite TypeScript 工程；锁定依赖到 package-lock.json，建立 .gitignore，排除构建产物、SQLite 和交接存档。
-- [ ] Step 2：先写 boot.spec.ts，启动 Electron，断言主窗口标题为 Agent Workbench，且渲染进程没有 Node require。
+- [ ] Step 2：先写 boot.spec.ts，启动 Electron，断言主窗口标题为 agent-home，且渲染进程没有 Node require。
 - [ ] Step 3：运行 npm run e2e，确认测试因应用入口未实现而失败。
 - [ ] Step 4：实现最小窗口与 preload 桥接；BrowserWindow 设置 contextIsolation: true、nodeIntegration: false、sandbox: true，设置本地内容 CSP。
 - [ ] Step 5：运行 npm run typecheck、npm test、npm run e2e；预期全部通过，打包后的主窗口可以打开。
