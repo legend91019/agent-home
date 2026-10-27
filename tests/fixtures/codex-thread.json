@@ -1,0 +1,40 @@
+{
+  "thread_id": "thread_demo_001",
+  "title": "实现分页工具",
+  "turns": [
+    {
+      "id": "t1",
+      "role": "user",
+      "status": "completed",
+      "created_at": "2026-01-15T11:00:00Z",
+      "content": [
+        { "type": "text", "text": "写一个把数组分页的 TypeScript 函数" }
+      ]
+    },
+    {
+      "id": "t2",
+      "role": "assistant",
+      "status": "completed",
+      "created_at": "2026-01-15T11:00:03Z",
+      "content": [
+        { "type": "text", "text": "好的，我来写一个。" },
+        {
+          "type": "tool_call",
+          "id": "tc1",
+          "name": "Bash",
+          "args": { "cmd": "ls src" },
+          "output": "index.ts\nparse.ts"
+        }
+      ]
+    },
+    {
+      "id": "t3",
+      "role": "user",
+      "status": "interrupted",
+      "created_at": "2026-01-15T11:00:10Z",
+      "content": [
+        { "type": "text", "text": "停，换个思路" }
+      ]
+    }
+  ]
+}

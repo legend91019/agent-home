@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    "types": ["node", "vitest/globals"],
+    "baseUrl": ".",
+    "outDir": ".vite/build"
+  },
+  "include": ["src", "tests", "scripts"],
+  "exclude": [
+    "node_modules",
+    ".vite",
+    "node_modules/.cache",
+    "src/main/electron-main.ts",
+    "src/main/preload.ts",
+    "src/renderer"
+  ]
+}

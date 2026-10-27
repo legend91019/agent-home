@@ -1,0 +1,9 @@
+node_modules/
+.vite/
+node_modules/.vitest-cache/
+.vitest-tmp/
+*.log
+.DS_Store
+agent-workbench.db
+dist/
+out/

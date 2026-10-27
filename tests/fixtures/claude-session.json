@@ -1,0 +1,37 @@
+[
+  {
+    "uuid": "msg_1",
+    "role": "user",
+    "timestamp": "2026-01-15T10:00:00Z",
+    "content": "请帮我重构 src/parse.ts 中的解析逻辑"
+  },
+  {
+    "uuid": "msg_2",
+    "role": "assistant",
+    "timestamp": "2026-01-15T10:00:05Z",
+    "content": [
+      { "type": "thinking", "thinking": "先看看现有结构再决定如何拆分" },
+      { "type": "text", "text": "我先读取文件并拆分解析函数。" },
+      {
+        "type": "tool_use",
+        "id": "tool_1",
+        "name": "Read",
+        "input": { "file_path": "src/parse.ts" }
+      }
+    ]
+  },
+  {
+    "uuid": "msg_3",
+    "role": "user",
+    "timestamp": "2026-01-15T10:00:10Z",
+    "content": [
+      { "type": "tool_result", "tool_use_id": "tool_1", "content": "export function parse() {}" }
+    ]
+  },
+  {
+    "uuid": "msg_4",
+    "role": "system",
+    "timestamp": "2026-01-15T10:00:11Z",
+    "content": "系统已加载项目上下文"
+  }
+]
