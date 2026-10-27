@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -87,8 +88,8 @@ describe("ClaudeAdapter.probe", () => {
       );
       expect(caps["config.read"]).toBe("supported");
       expect(caps["config.publish"]).toBe("supported");
-      expect(caps["sessions.list"]).toBe("unknown");
-      expect(caps["sessions.readVisible"]).toBe("unknown");
+      expect(caps["sessions.list"]).toBe("supported");
+      expect(caps["sessions.readVisible"]).toBe("supported");
       // interrupt 未实现 -> unsupported
       expect(caps["tasks.interrupt"]).toBe("unsupported");
       // 每条能力都带证据与探测时间
@@ -101,8 +102,39 @@ describe("ClaudeAdapter.probe", () => {
 });
 
 describe("ClaudeAdapter.startTask", () => {
-  it("(d) 从不假装成功，抛出结构化 WorkbenchError", async () => {
-    const adapter = new ClaudeAdapter();
+  it("用 stdin 传递特殊字符提示，等到真实 init 后返回，并观察完成状态", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claude-cli-"));
+    try {
+      const script = join(root, "fake.cjs");
+      writeFileSync(script, `const fs=require('node:fs'); const args=process.argv.slice(2);
+if(args[0]==='auth'){console.log(JSON.stringify({loggedIn:true}));process.exit(0)}
+let text='';process.stdin.on('data',c=>text+=c);process.stdin.on('end',()=>{fs.writeFileSync(${JSON.stringify(join(root, "input.txt"))},text); console.log(JSON.stringify({type:'system',subtype:'init',session_id:args[args.length-1]}));setTimeout(()=>process.exit(0),25)});`);
+      const adapter = new ClaudeAdapter({ configDirectory: root, command: { file: process.execPath, args: [script] } });
+      const goal = '保留 "引用" & $(echo unsafe)\n下一行';
+      const handoffPath = join(root, "完整交接.json");
+      const handle = await adapter.startTask({ ...startInput, projectPath: root, goal, handoffPath });
+      expect(handle.nativeSessionId).toMatch(/^[a-f0-9-]{36}$/);
+      expect(await adapter.waitForCompletion(handle)).toBe("succeeded");
+      const prompt = readFileSync(join(root, "input.txt"), "utf8");
+      expect(prompt).toContain(JSON.stringify(handoffPath));
+      expect(prompt).toContain("UTF-8");
+      expect(prompt.endsWith(goal)).toBe(true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("CLI 在会话建立前退出时拒绝返回成功句柄", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claude-cli-"));
+    try {
+      const script = join(root, "fail.cjs");
+      writeFileSync(script, `if(process.argv[2]==='auth'){console.log('{"loggedIn":true}')}else{process.exit(1)}`);
+      const adapter = new ClaudeAdapter({ configDirectory: root, command: { file: process.execPath, args: [script] } });
+      await expect(adapter.startTask({ ...startInput, projectPath: root })).rejects.toMatchObject({ code: "process_failed" });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("(d) 未登录时抛出结构化 WorkbenchError", async () => {
+    class LoggedOut extends ClaudeAdapter { override authenticated(): boolean { return false; } }
+    const adapter = new LoggedOut();
     let err: unknown;
     try {
       await adapter.startTask(startInput);
@@ -112,6 +144,32 @@ describe("ClaudeAdapter.startTask", () => {
     expect(err).toBeInstanceOf(WorkbenchError);
     const code = (err as WorkbenchError).code;
     expect(["not_authenticated", "unsupported", "unknown", "unsupported_version"]).toContain(code);
+  });
+});
+
+describe("Claude 本地会话", () => {
+  it("发现真实 transcript 信封并保留完整工具输入输出，排除隐藏推理与元数据", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claude-adapter-"));
+    try {
+      const dir = join(root, "projects", startInput.projectPath.replace(/[^a-zA-Z0-9]/g, "-"));
+      mkdirSync(dir, { recursive: true });
+      const long = "完整原文".repeat(300);
+      writeFileSync(join(dir, "native-session.jsonl"), [
+        { type: "file-history-snapshot", snapshot: {} },
+        { type: "user", sessionId: "native-session", cwd: startInput.projectPath, uuid: "u", timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "目标" } },
+        { type: "assistant", uuid: "a", timestamp: "2026-01-01T00:00:01Z", message: { role: "assistant", content: [{ type: "thinking", thinking: "隐藏" }, { type: "tool_use", id: "t", name: "Read", input: { value: long } }] } },
+        { type: "user", uuid: "r", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: long }] } },
+      ].map((entry) => JSON.stringify(entry)).join("\n"));
+      const adapter = new ClaudeAdapter({ configDirectory: root });
+      const sessions = await adapter.listSessions(startInput.projectPath);
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]).toMatchObject({ id: "native-session", messageCount: 3, title: "目标" });
+      const events = [];
+      for await (const event of adapter.readVisibleSession(sessions[0])) events.push(event);
+      expect(events[1].toolCalls?.[0].inputSummary).toBe(JSON.stringify({ value: long }));
+      expect(events[2].text).toBe(long);
+      expect(JSON.stringify(events)).not.toContain("隐藏");
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
 

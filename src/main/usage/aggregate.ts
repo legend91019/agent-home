@@ -215,9 +215,15 @@ export class UsageAggregator {
     const discoveredRows = this.db.getRows(discSql, ...discParams);
     const discovered = discoveredRows.map((r) => String(r.name));
 
-    const invokedRows = this.db.getRows(
-      "SELECT DISTINCT payload FROM run_events WHERE type = 'skill_invocation'",
-    );
+    const invokedRows = filter.projectId === undefined
+      ? this.db.getRows("SELECT DISTINCT payload FROM run_events WHERE type = 'skill_invocation'")
+      : this.db.getRows(
+        `SELECT DISTINCT events.payload FROM run_events AS events
+         JOIN runs ON runs.id = events.run_id
+         JOIN tasks ON tasks.id = runs.task_id
+         WHERE events.type = 'skill_invocation' AND tasks.project_id = ?`,
+        filter.projectId,
+      );
     const invoked: string[] = [];
     const seen = new Set<string>();
     for (const r of invokedRows) {

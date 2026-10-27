@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { SqliteDatabase } from "../../src/main/db/database";
 import { makeDb, seedProject } from "../helpers/db";
 import { AdapterRegistry } from "../../src/main/adapters/registry";
-import { BaseAdapter, RunHandle } from "../../src/main/adapters/types";
+import { BaseAdapter, RunHandle, StartTaskInput } from "../../src/main/adapters/types";
 import { TaskRuntime } from "../../src/main/tasks/runtime";
 import { WorkspaceManager } from "../../src/main/workspaces/git";
 import { WorkflowScheduler } from "../../src/main/workflows/scheduler";
@@ -31,6 +31,7 @@ const AGENT: AgentId = "claude-code";
 class FakeAdapter extends BaseAdapter {
   readonly id: AgentId = AGENT;
   readonly displayName = "Fake";
+  readonly inputs: StartTaskInput[] = [];
 
   async probe(): Promise<CapabilityReport> {
     return {
@@ -51,7 +52,8 @@ class FakeAdapter extends BaseAdapter {
     return;
   }
 
-  async startTask(): Promise<RunHandle> {
+  async startTask(input: StartTaskInput): Promise<RunHandle> {
+    this.inputs.push(input);
     return { runId: "native", nativeSessionId: "s", startedAt: new Date().toISOString() };
   }
 }
@@ -78,19 +80,21 @@ interface Ctx {
   tasks: TaskRuntime;
   sched: WorkflowScheduler;
   taskId: string;
+  adapter: FakeAdapter;
 }
 
 /** 用给定项目路径搭建一次性的调度上下文；非写入节点用虚拟路径即可。 */
 function setup(projPath = "/tmp/proj"): Ctx {
   const db = makeDb();
   const adapters = new AdapterRegistry(db);
-  adapters.register(new FakeAdapter());
+  const adapter = new FakeAdapter();
+  adapters.register(adapter);
   const tasks = new TaskRuntime(db, adapters);
   const workspaces = new WorkspaceManager(db);
   const sched = new WorkflowScheduler(db, tasks, workspaces);
   seedProject(db, "p1", projPath);
   const task = tasks.createTask("p1", "task", "goal");
-  return { db, tasks, sched, taskId: task.id };
+  return { db, tasks, sched, taskId: task.id, adapter };
 }
 
 /** 创建一个带初始提交的真实 git 仓库，供写入仓库的节点使用。 */
@@ -262,6 +266,38 @@ describe("WorkflowScheduler", () => {
     expect(runningWriters.length).toBe(2);
     // 未达上限的节点应保持 ready，等待下次推进。
     expect(st.nodes.find((n) => n.id === "C")!.status).toBe("ready");
+  });
+
+  it("写入节点在 Agent 启动前使用独立 worktree 和节点指令", async () => {
+    const projPath = gitProject();
+    const { sched, taskId, adapter, db } = setup(projPath);
+    const wf = await sched.startWorkflow(taskId, makeDef("isolation", [
+      makeNode("A", { writesRepo: true, input: "只修改独立分支中的 seed.txt" }),
+    ]));
+    const state = await sched.advanceWorkflow(wf.id);
+    const runId = state.nodes[0].runId!;
+    const workspace = db.getRow("SELECT path FROM workspaces WHERE run_id = ?", runId);
+    expect(workspace).toBeTruthy();
+    expect(adapter.inputs[0].projectPath).toBe(workspace!.path);
+    expect(adapter.inputs[0].projectPath).not.toBe(projPath);
+    expect(adapter.inputs[0].goal).toBe("只修改独立分支中的 seed.txt");
+  });
+
+  it("写入节点重试会创建新工作区而不复用失败分支", async () => {
+    const projPath = gitProject();
+    const { sched, taskId, tasks, db, adapter } = setup(projPath);
+    const wf = await sched.startWorkflow(taskId, makeDef("retry-writer", [
+      makeNode("A", { writesRepo: true }),
+    ]));
+    const started = await sched.advanceWorkflow(wf.id);
+    const firstRun = started.nodes[0].runId!;
+    tasks.setRunStatus(firstRun, "failed");
+    await sched.advanceWorkflow(wf.id);
+    const retried = await sched.retryNode(wf.id, "A");
+    const secondRun = retried.nodes[0].runId!;
+    expect(secondRun).not.toBe(firstRun);
+    expect(db.getRows("SELECT id FROM workspaces WHERE run_id IN (?, ?)", firstRun, secondRun)).toHaveLength(2);
+    expect(adapter.inputs[1].projectPath).not.toBe(adapter.inputs[0].projectPath);
   });
 
   it("暂停后 advance 不推进", async () => {

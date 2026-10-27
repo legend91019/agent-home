@@ -4,10 +4,12 @@
  * 状态机在 setRunStatus / setTaskStatus 中强制校验，非法转换抛 WorkbenchError('invalid_data')。
  */
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { SqliteDatabase } from "../db/database";
 import { AdapterRegistry } from "../adapters/registry";
 import { ProjectRegistry } from "../projects/registry";
-import { StartTaskInput } from "../adapters/types";
+import { RunHandle, StartTaskInput } from "../adapters/types";
 import {
   AgentId,
   RunDTO,
@@ -20,19 +22,19 @@ import { recordRunEvent, recordRunEventIdempotent } from "./events";
 
 /** 任务状态机：键为当前态，值为允许到达的下一态。 */
 const TASK_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
-  draft: ["ready", "running"],
-  ready: ["running"],
+  draft: ["ready", "running", "failed"],
+  ready: ["running", "failed"],
   running: ["review_required", "failed", "cancelled"],
-  review_required: ["completed", "failed", "cancelled"],
+  review_required: ["running", "completed", "failed", "cancelled"],
   completed: [],
-  failed: [],
-  cancelled: [],
+  failed: ["running"],
+  cancelled: ["running"],
 };
 
 /** 运行状态机：线性推进，终态可于运行/等待用户输入期间进入。 */
 const RUN_TRANSITIONS: Record<RunStatus, RunStatus[]> = {
   queued: ["starting"],
-  starting: ["running"],
+  starting: ["running", "failed"],
   running: ["waiting_for_user", "succeeded", "failed", "cancelled"],
   waiting_for_user: ["running", "succeeded", "failed", "cancelled"],
   succeeded: [],
@@ -64,6 +66,8 @@ interface TaskRow {
 }
 
 export class TaskRuntime {
+  private readonly liveHandles = new Map<string, RunHandle>();
+
   constructor(
     private readonly db: SqliteDatabase,
     private readonly adapters: AdapterRegistry,
@@ -132,7 +136,7 @@ export class TaskRuntime {
   async startRun(
     taskId: string,
     agentId: AgentId,
-    opts?: { sessionId?: string; workspaceId?: string; handoffId?: string },
+    opts?: { sessionId?: string; workspaceId?: string; handoffId?: string; handoffPath?: string; goalOverride?: string },
   ): Promise<RunDTO> {
     const taskRow = this.db.getRow("SELECT * FROM tasks WHERE id = ?", taskId);
     if (!taskRow) throw new WorkbenchError("invalid_data", `未知任务: ${taskId}`);
@@ -145,17 +149,30 @@ export class TaskRuntime {
     if (!project) {
       throw new WorkbenchError("invalid_data", `未知项目: ${taskRow.project_id}`);
     }
+    let executionPath = project.path;
+    if (opts?.workspaceId) {
+      const workspace = this.db.getRow(
+        "SELECT project_id, path FROM workspaces WHERE id = ?",
+        opts.workspaceId,
+      );
+      if (!workspace || String(workspace.project_id) !== project.id) {
+        throw new WorkbenchError("invalid_data", "工作区不存在或不属于当前项目");
+      }
+      executionPath = String(workspace.path);
+    }
 
     // 能力协商：决定该 Run 是否可由工作台中断（适配器声明 tasks.interrupt）。
-    const report = await this.adapters.getReport(agentId, project.id, project.path);
-    const controllable = this.adapters.isCapability(report, "tasks.interrupt") ? 1 : 0;
+    const report = await this.adapters.getReport(agentId, project.id, project.path, { force: true });
+    const controllable =
+      this.adapters.isCapability(report, "tasks.interrupt") &&
+      typeof adapter.interrupt === "function" ? 1 : 0;
 
     const now = new Date().toISOString();
     const runId = crypto.randomUUID();
     const workspaceId = opts?.workspaceId ?? null;
     const handoffId = opts?.handoffId ?? null;
 
-    // 初始落库：queued -> starting -> running 的状态推进。
+    // 先持久化 starting；只有原生任务成功启动后才能进入 running。
     this.db.transaction((tx) => {
       tx.run(
         `INSERT INTO runs
@@ -173,22 +190,31 @@ export class TaskRuntime {
         handoffId,
       );
       tx.run("UPDATE runs SET status = ?, updated_at = ? WHERE id = ?", "starting", now, runId);
-      tx.run("UPDATE runs SET status = ?, updated_at = ? WHERE id = ?", "running", now, runId);
     });
 
+    const guidanceDir = path.join(project.path, ".agent-workbench", "memory");
+    const guidancePaths = [`${agentId}.md`, `${agentId}-task.md`]
+      .map((name) => path.join(guidanceDir, name))
+      .filter((file) => fs.existsSync(file) && fs.statSync(file).isFile());
+    const goal = opts?.goalOverride ?? String(taskRow.goal);
+    const taskGoal = guidancePaths.length
+      ? `请先读取工作台已发布的项目记忆指导文件：\n${guidancePaths.join("\n")}\n然后执行任务：\n${goal}`
+      : goal;
     const input: StartTaskInput = {
       projectId: project.id,
-      projectPath: project.path,
+      projectPath: executionPath,
       agentId,
-      goal: String(taskRow.goal),
+      goal: taskGoal,
       workspaceId: opts?.workspaceId,
       sessionId: opts?.sessionId,
       handoffId: opts?.handoffId,
+      handoffPath: opts?.handoffPath,
       memoryEntryIds: undefined,
     };
 
     try {
       const handle = await adapter.startTask(input);
+      this.liveHandles.set(runId, handle);
       this.db.run(
         "UPDATE runs SET native_session_id = ?, updated_at = ? WHERE id = ?",
         handle.nativeSessionId ?? null,
@@ -197,13 +223,14 @@ export class TaskRuntime {
       );
       // 任务进入 running（draft/ready -> running 在本状态机中合法）。
       this.setTaskStatus(taskId, "running");
+      this.setRunStatus(runId, "running");
+      if (adapter.waitForCompletion) {
+        void this.observeCompletion(runId, taskId, adapter.waitForCompletion(handle));
+      }
     } catch (err) {
-      this.db.run(
-        "UPDATE runs SET status = ?, updated_at = ? WHERE id = ?",
-        "failed",
-        new Date().toISOString(),
-        runId,
-      );
+      this.liveHandles.delete(runId);
+      this.setRunStatus(runId, "failed");
+      this.setTaskStatus(taskId, "failed");
       throw toWorkbenchError(err);
     }
 
@@ -261,25 +288,46 @@ export class TaskRuntime {
       throw new WorkbenchError("permission_denied", "该 Run 不可由工作台中断");
     }
     const adapter = this.adapters.get(run.agentId);
-    const handle = {
-      runId,
-      nativeSessionId: run.nativeSessionId,
-      pid: undefined,
-      startedAt: run.createdAt,
-    };
-    if (typeof adapter.interrupt === "function") {
-      try {
-        await adapter.interrupt(handle);
-        this.setRunStatus(runId, "cancelled");
-        return { ok: true };
-      } catch (err) {
-        this.setRunStatus(runId, "failed");
-        throw toWorkbenchError(err);
-      }
+    const handle = this.liveHandles.get(runId);
+    if (!handle || typeof adapter.interrupt !== "function") {
+      throw new WorkbenchError("permission_denied", "该 Run 已失去可控制的原生进程");
     }
-    // 声明可控但缺失 interrupt 实现时的兜底。
-    this.setRunStatus(runId, "cancelled");
+    try {
+      await adapter.interrupt(handle);
+    } catch (err) {
+      throw toWorkbenchError(err);
+    }
+    this.liveHandles.delete(runId);
+    if (this.getRun(runId)?.status === "running") this.setRunStatus(runId, "cancelled");
+    if (this.getTask(run.taskId)?.status === "running") this.setTaskStatus(run.taskId, "cancelled");
     return { ok: true };
+  }
+
+  private async observeCompletion(
+    runId: string,
+    taskId: string,
+    completion: Promise<"succeeded" | "failed" | "cancelled">,
+  ): Promise<void> {
+    let status: "succeeded" | "failed" | "cancelled";
+    try {
+      status = await completion;
+    } catch (err) {
+      status = "failed";
+      this.appendRunEvent(runId, "adapter_error", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    this.liveHandles.delete(runId);
+    if (this.getRun(runId)?.status !== "running") return;
+    this.setRunStatus(runId, status);
+    const otherActive = this.db.getRow(
+      "SELECT 1 FROM runs WHERE task_id = ? AND id <> ? AND status IN ('queued', 'starting', 'running', 'waiting_for_user') LIMIT 1",
+      taskId,
+      runId,
+    );
+    if (!otherActive && this.getTask(taskId)?.status === "running") {
+      this.setTaskStatus(taskId, status === "succeeded" ? "review_required" : status);
+    }
   }
 
   /* --------------------------- 内部构建 --------------------------- */
@@ -296,7 +344,10 @@ export class TaskRuntime {
       updatedAt: String(r.updated_at),
       workspaceId: r.workspace_id ?? undefined,
       handoffId: r.handoff_id ?? undefined,
-      controllable: Number(r.controllable) === 1,
+      controllable:
+        Number(r.controllable) === 1 &&
+        (r.status === "running" || r.status === "waiting_for_user") &&
+        this.liveHandles.has(String(r.id)),
     };
   }
 

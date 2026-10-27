@@ -13,7 +13,7 @@
     "vite.main.config.ts",
     "vite.preload.config.ts",
     "vite.renderer.config.ts",
-    "forge.config.ts"
+    "forge.config.cjs"
   ],
   "exclude": ["node_modules", ".vite"]
 }

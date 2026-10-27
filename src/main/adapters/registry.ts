@@ -11,6 +11,7 @@ import { WorkbenchError } from "../../shared/errors";
 
 export class AdapterRegistry {
   private readonly adapters = new Map<AgentId, AgentAdapter>();
+  private readonly cacheTtlMs = 30_000;
 
   constructor(private readonly db: SqliteDatabase) {}
 
@@ -66,11 +67,16 @@ export class AdapterRegistry {
     agentId: AgentId,
     projectId: string,
     projectPath: string,
+    opts?: { force?: boolean },
   ): Promise<CapabilityReport> {
     const adapter = this.get(agentId);
     const currentVersion = this.safeVersion(adapter);
     const cached = this.readCache(agentId, projectId);
-    if (cached && currentVersion !== null && cached.version === currentVersion) {
+    const fresh = cached && Number.isFinite(Date.parse(cached.checkedAt)) &&
+      Date.now() - Date.parse(cached.checkedAt) < this.cacheTtlMs;
+    const sameVersion = currentVersion !== null && cached?.version != null &&
+      (cached.version === currentVersion || cached.version.endsWith(` ${currentVersion}`));
+    if (!opts?.force && fresh && sameVersion) {
       return cached;
     }
     let report: CapabilityReport;

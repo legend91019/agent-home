@@ -12,6 +12,7 @@ import {
 } from "../../shared/contracts";
 import { WorkbenchError } from "../../shared/errors";
 import { LARGE_ATTACHMENT_BYTES } from "./package";
+import { snapshotHash } from "./archive";
 
 function rowToEvent(row: Record<string, unknown>): VisibleEvent {
   return {
@@ -64,7 +65,7 @@ export function readCopy(db: SqliteDatabase, handoffId: string): VisibleEvent[] 
       const atts = (ev.attachments ?? []).filter(
         (a) => !(ed.removeAttachments ?? []).includes(a.name),
       );
-      return { ...ev, text: ed.text, attachments: atts.length ? atts : ev.attachments };
+      return { ...ev, text: ed.text, attachments: atts };
     })
     .filter((e): e is VisibleEvent => e !== null);
 }
@@ -109,8 +110,13 @@ export function verifyPackage(db: SqliteDatabase, handoffId: string): IntegrityR
   const sourceCount = row.source_message_count != null ? Number(row.source_message_count) : null;
 
   const missing: string[] = [];
-  if (sourceCount !== null && readCount < sourceCount) {
-    missing.push(`读取条数少于源记录：已读 ${readCount} / 源 ${sourceCount}`);
+  if (sourceCount === null) {
+    missing.push("源工具未提供总条数，无法独立核对完整性");
+  } else if (readCount !== sourceCount) {
+    missing.push(`读取条数与源记录不符：已读 ${readCount} / 源 ${sourceCount}`);
+  }
+  if (snapshotHash(readSnapshot(db, handoffId)) !== String(row.source_snapshot_hash)) {
+    missing.push("源快照哈希不匹配");
   }
 
   const largeAttachments: string[] = [];

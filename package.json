@@ -5,42 +5,39 @@
   "description": "本地 Agent 工作台：在项目内管理多个编码 Agent 的共享配置、记忆互转、完整对话交接、顺序与并行任务、审查合并及有来源标记的统计。",
   "license": "MIT",
   "author": "Agent Workbench",
-  "main": ".vite/build/main.js",
-  "type": "module",
+  "main": ".vite/build/electron-main.cjs",
   "scripts": {
     "dev": "electron-forge start",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck:electron": "tsc --noEmit -p tsconfig.electron.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "playwright test",
+    "e2e": "playwright test --config tests/frontend/playwright.config.ts",
+    "smoke:package": "node tests/frontend/packaged-smoke.mjs",
     "probe:adapters": "tsx scripts/probe-claude.mts && tsx scripts/probe-codex.mts",
     "make": "electron-forge make",
     "package": "electron-forge package"
   },
   "dependencies": {
-    "better-sqlite3": "11.8.1",
     "electron-squirrel-startup": "1.0.1",
     "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "zod": "3.23.8"
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "@electron-forge/cli": "7.6.0",
-    "@electron-forge/maker-squirrel": "7.6.0",
-    "@electron-forge/maker-zip": "7.6.0",
-    "@electron-forge/plugin-vite": "7.6.0",
-    "@playwright/test": "1.48.2",
-    "@types/better-sqlite3": "7.6.12",
-    "@types/node": "22.9.0",
+    "@electron-forge/cli": "^8.0.1",
+    "@electron-forge/maker-squirrel": "^8.0.1",
+    "@electron-forge/maker-zip": "^8.0.1",
+    "@electron-forge/plugin-vite": "^8.0.1",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^22.20.5",
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
-    "@vitejs/plugin-react": "4.3.3",
-    "electron": "33.2.0",
-    "tsx": "4.19.2",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "45.0.0",
+    "tsx": "^4.23.15",
     "typescript": "5.6.3",
-    "vite": "5.4.10",
-    "vitest": "2.1.4"
+    "vite": "^7.3.7",
+    "vitest": "^5.0.5"
   },
   "engines": {
     "node": ">=22"

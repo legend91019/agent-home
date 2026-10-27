@@ -1,16 +1,16 @@
 /**
- * SQLite 连接封装。生产使用 better-sqlite3；本环境使用 Node 内置 node:sqlite
- * （零原生编译，支持 WAL、预编译语句与事务，满足设计的数据完整性要求）。
+ * SQLite 连接封装。使用 Electron 自带的 node:sqlite，
+ * 避免本地原生模块 ABI 与 Electron 内置 Node 版本不一致。
  * 业务模块只依赖这里暴露的窄接口，不直接接触底层驱动。
  */
-import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
-// 通过 createRequire 加载 node:sqlite，避免打包器静态解析该较新内置模块。
-const { DatabaseSync } = require("node:sqlite") as {
-  DatabaseSync: new (location: string, options?: Record<string, unknown>) => NodeSqliteDb;
+// Vite 5 对 node:sqlite 静态导入的解析有缺陷；从宿主 Node/Electron 运行时加载内置模块。
+const nodeRequire = createRequire(path.join(process.cwd(), "__agent_workbench__.cjs"));
+const { DatabaseSync } = nodeRequire("node:sqlite") as {
+  DatabaseSync: new (location: string) => NodeSqliteDb;
 };
 
 interface StatementSync {
@@ -30,7 +30,7 @@ export interface RunResult {
   lastInsertRowid: number | bigint;
 }
 
-/** 预编译语句的窄封装，与 better-sqlite3 的使用方式一致。 */
+/** 预编译语句的窄封装。 */
 export class Statement {
   constructor(private readonly stmt: StatementSync) {}
 

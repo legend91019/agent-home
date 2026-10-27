@@ -21,8 +21,10 @@ export interface StartTaskInput {
   goal: string;
   /** 并行分支使用的独立 worktree 工作区；未提供则使用主目录 */
   workspaceId?: string;
-  /** 来自交接包的历史索引路径，供目标 Agent 按需读取原文 */
+  /** 来源交接包的主键，供审计与关联使用 */
   handoffId?: string;
+  /** 用户确认的交接包全文文件路径，供目标 Agent 读取可见历史 */
+  handoffPath?: string;
   /** 用户审查后选定为上下文的持久记忆条目 */
   memoryEntryIds?: string[];
   /** 若适配器支持，恢复既有原生会话 */
@@ -57,6 +59,9 @@ export interface AgentAdapter {
 
   /** 可选：仅当适配器声明 tasks.interrupt 能力时存在 */
   interrupt?(handle: RunHandle): Promise<void>;
+
+  /** 可选：等待当前原生运行进入终态，用于同步面板任务状态 */
+  waitForCompletion?(handle: RunHandle): Promise<"succeeded" | "failed" | "cancelled">;
 }
 
 export abstract class BaseAdapter implements AgentAdapter {

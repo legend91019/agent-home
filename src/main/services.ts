@@ -24,6 +24,7 @@ import { UsageAggregator } from "./usage/aggregate";
 import { RecoveryService } from "./recovery/reconcile";
 import { RedactionScanner } from "./security/redaction";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 
 export interface AppContext {
   dataDir: string;
@@ -67,7 +68,9 @@ export function createContext(
   const memory = new MemoryInventory(db);
   const memoryTransfer = new MemoryTransfer(db, publisher);
   const tasks = new TaskRuntime(db, adapters);
-  const workspaces = new WorkspaceManager(db);
+  const workspaces = new WorkspaceManager(db, (projectPath) =>
+    path.join(dataDir, "worktrees", createHash("sha256").update(projectPath).digest("hex")),
+  );
   const workflows = new WorkflowScheduler(db, tasks, workspaces);
   const merge = new MergeService(db, workspaces);
   const usage = new UsageAggregator(db);

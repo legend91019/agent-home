@@ -231,11 +231,18 @@ export interface SharedArtifactDTO {
 export type DiffChoice = "keep-native" | "overwrite-with-shared" | "manual-merge";
 
 export interface PublishDiffEntry {
+  /** choices 使用此来源标识为键；目标路径可能被多个来源共享。 */
+  artifactId: string;
+  sourcePath: string;
+  kind: SharedArtifactDTO["kind"];
   path: string;
   status: "new" | "changed" | "identical" | "conflict";
   sharedHash: string | null;
   nativeHash: string | null;
   lastPublishedHash: string | null;
+  /** false 表示没有已验证目标或来源不安全，禁止应用。 */
+  publishable?: boolean;
+  reason?: string;
 }
 
 export interface PublishDiff {
@@ -249,6 +256,7 @@ export interface PublishDiff {
 export interface PublishReceipt {
   id: string;
   diffId: string;
+  /** 配置发布以 artifactId 为键，只包含实际应用的条目。 */
   appliedChoices: Record<string, DiffChoice>;
   backupPath?: string;
   appliedAt: string;
@@ -353,6 +361,8 @@ export interface MergeBranchDTO {
   agentId: AgentId;
   branch: string;
   baseCommit: string;
+  /** 创建提案时分支的 HEAD；旧提案缺失时不允许自动应用。 */
+  headCommit?: string;
   committedChanges: number;
   uncommittedChanges: number;
   untrackedFiles: number;
@@ -461,6 +471,12 @@ export interface IpcContract {
     output: VisibleEvent[];
   };
   "handoff.integrity": { input: { handoffId: string }; output: IntegrityReport };
+  "handoff.summary": { input: { handoffId: string }; output: HandoffSummary };
+  "handoff.findings": { input: { handoffId: string }; output: RedactionFinding[] };
+  "handoff.edit": {
+    input: { handoffId: string; edits: HandoffEdit[] };
+    output: HandoffSummary;
+  };
   "handoff.consume": {
     input: { handoffId: string; targetAgentId: AgentId; goal: string };
     output: RunDTO;
@@ -477,8 +493,12 @@ export interface IpcContract {
   "tasks.interrupt": { input: { runId: string }; output: { ok: boolean } };
   "tasks.state": { input: { runId: string }; output: RunDTO };
   "workflow.start": { input: { taskId: string; definition: WorkflowDef }; output: WorkflowRunDTO };
+  "workflow.get": { input: { workflowRunId: string }; output: WorkflowRunDTO | null };
   "workflow.advance": { input: { workflowRunId: string }; output: WorkflowRunDTO };
   "workflow.pause": { input: { workflowRunId: string }; output: { ok: boolean } };
+  "workflow.resume": { input: { workflowRunId: string }; output: WorkflowRunDTO };
+  "workflow.approve": { input: { workflowRunId: string; nodeId: string }; output: WorkflowRunDTO };
+  "workflow.retry": { input: { workflowRunId: string; nodeId: string }; output: WorkflowRunDTO };
   "merge.create": { input: { workflowRunId: string }; output: MergeProposalDTO };
   "merge.refresh": { input: { proposalId: string }; output: MergeProposalDTO };
   "merge.apply": {
@@ -507,6 +527,9 @@ export const IPC_CHANNELS = [
   "handoff.create",
   "handoff.search",
   "handoff.integrity",
+  "handoff.summary",
+  "handoff.findings",
+  "handoff.edit",
   "handoff.consume",
   "tasks.list",
   "tasks.create",
@@ -514,8 +537,12 @@ export const IPC_CHANNELS = [
   "tasks.interrupt",
   "tasks.state",
   "workflow.start",
+  "workflow.get",
   "workflow.advance",
   "workflow.pause",
+  "workflow.resume",
+  "workflow.approve",
+  "workflow.retry",
   "merge.create",
   "merge.refresh",
   "merge.apply",

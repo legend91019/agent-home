@@ -23,6 +23,12 @@ function canonicalRow(e: VisibleEvent): string {
   ].join("");
 }
 
+export function snapshotHash(events: VisibleEvent[]): string {
+  return "sha256-" + createHash("sha256")
+    .update(events.map(canonicalRow).join("\n"))
+    .digest("hex");
+}
+
 export async function archiveSession(
   db: SqliteDatabase,
   source: AsyncIterable<VisibleEvent>,
@@ -41,31 +47,39 @@ export async function archiveSession(
     projectId,
     session.agentId,
     session.id,
-    session.messageCount ?? null,
+    session.messageCount > 0 ? session.messageCount : null,
     `${handoffId}.json`,
     new Date().toISOString(),
   );
-  for await (const ev of source) {
-    const toolCalls = JSON.stringify(ev.toolCalls ?? []);
-    const attachments = JSON.stringify(ev.attachments ?? []);
-    db.run(
-      `INSERT INTO handoff_messages
-        (handoff_id, idx, role, timestamp, native_id, text, tool_calls, attachments, redacted)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      handoffId,
-      idx,
-      ev.role,
-      ev.timestamp,
-      ev.nativeId ?? null,
-      ev.text ?? null,
-      toolCalls,
-      attachments,
-      ev.redacted ? 1 : 0,
-    );
-    rows.push(canonicalRow({ ...ev, toolCalls: ev.toolCalls ?? [], attachments: ev.attachments ?? [] }));
-    idx++;
+  try {
+    for await (const ev of source) {
+      const toolCalls = JSON.stringify(ev.toolCalls ?? []);
+      const attachments = JSON.stringify(ev.attachments ?? []);
+      db.run(
+        `INSERT INTO handoff_messages
+          (handoff_id, idx, role, timestamp, native_id, text, tool_calls, attachments, redacted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        handoffId,
+        idx,
+        ev.role,
+        ev.timestamp,
+        ev.nativeId ?? null,
+        ev.text ?? null,
+        toolCalls,
+        attachments,
+        ev.redacted ? 1 : 0,
+      );
+      rows.push(canonicalRow(ev));
+      idx++;
+    }
+    const hash = "sha256-" + createHash("sha256").update(rows.join("\n")).digest("hex");
+    db.run("UPDATE handoffs SET source_snapshot_hash = ? WHERE id = ?", hash, handoffId);
+    return { handoffId, snapshotHash: hash, messageCount: idx };
+  } catch (error) {
+    db.transaction((tx) => {
+      tx.run("DELETE FROM handoff_messages WHERE handoff_id = ?", handoffId);
+      tx.run("DELETE FROM handoffs WHERE id = ?", handoffId);
+    });
+    throw error;
   }
-  const snapshotHash = "sha256-" + createHash("sha256").update(rows.join("\n")).digest("hex");
-  db.run("UPDATE handoffs SET source_snapshot_hash = ? WHERE id = ?", snapshotHash, handoffId);
-  return { handoffId, snapshotHash, messageCount: idx };
 }

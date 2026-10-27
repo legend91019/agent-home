@@ -1,183 +1,245 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
-import * as crypto from "node:crypto";
-import { mkdtempSync } from "node:fs";
-import { makeDb, seedProject } from "../helpers/db";
-import { SqliteDatabase } from "../../src/main/db/database";
-import { ConfigInventory } from "../../src/main/config/inventory";
-import { ConfigPublisher } from "../../src/main/config/publisher";
-
-const FIXTURE = path.resolve(__dirname, "../fixtures/config-drift");
-
-function tmpProject(): string {
-  return mkdtempSync(path.join(os.tmpdir(), "cw-config-"));
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { makeDb, seedProject } from '../helpers/db';
+import { SqliteDatabase } from '../../src/main/db/database';
+import { ConfigPublisher } from '../../src/main/config/publisher';
+import { applyMigrations, MIGRATIONS } from '../../src/main/db/migrations';
+import type { AgentId, PublishDiff, PublishDiffEntry } from '../../src/shared/contracts';
+function entry(diff: PublishDiff, name: string): PublishDiffEntry {
+  const found = diff.entries.find(e => path.basename(e.sourcePath) === name);
+  expect(found, `missing source ${name}`).toBeTruthy();
+  return found!;
 }
-
-function copyDir(src: string, dest: string): void {
-  fs.mkdirSync(dest, { recursive: true });
-  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
-    const s = path.join(src, e.name);
-    const d = path.join(dest, e.name);
-    if (e.isDirectory()) copyDir(s, d);
-    else fs.copyFileSync(s, d);
-  }
-}
-
-function sha256File(p: string): string {
-  return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
-}
-
-// 用 'antigravity' 作为目标 Agent，其原生目标为 <root>/.antigravity.md，
-// 该路径不会被 scanArtifacts 当作 rule 自动发现，避免重复产物干扰。
-const AGENT = "antigravity" as const;
-
-describe("ConfigPublisher", () => {
+describe('ConfigPublisher safe publication', () => {
   let db: SqliteDatabase;
   let dir: string;
-
-  beforeEach(() => {
-    db = makeDb();
-    dir = tmpProject();
-    seedProject(db, "p1", dir);
+  const write = (name: string, body: string) => { const file = path.join(dir, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, body); return file; };
+  const read = (name: string) => fs.readFileSync(path.join(dir, name), 'utf8');
+  const skill = (location = 'shared/my-skill') => { write(`${location}/SKILL.md`, 'skill body'); write(`${location}/assets/icon.png`, 'resource bytes'); return path.join(dir, location); };
+  beforeEach(() => { db = makeDb(); dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-safe-publish-')); seedProject(db, 'p1', dir); });
+  afterEach(() => { vi.restoreAllMocks(); db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  it('publishes selected artifact with a stable source identity', () => {
+    write('CLAUDE.md', 'shared');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'CLAUDE.md');
+    expect(e).toMatchObject({ artifactId: expect.any(String), sourcePath: path.join(dir, 'CLAUDE.md'), kind: 'rule', path: path.join(dir, 'AGENTS.md'), status: 'new' });
+    const receipt = p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    expect(read('AGENTS.md')).toBe('shared');
+    expect(receipt.appliedChoices[e.artifactId]).toBe('overwrite-with-shared');
+    expect(db.getRows('SELECT * FROM publications WHERE diff_id = ?', d.id)).toHaveLength(1);
   });
-  afterEach(() => {
-    try {
-      db.close();
-    } catch {
-      /* ignore */
+  it('rejects multiple selected sources targeting one file before any write', () => {
+    write('CLAUDE.md', 'claude');
+    write('GEMINI.md', 'gemini');
+    write('AGENTS.md', 'native');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const a = entry(d, 'CLAUDE.md'), b = entry(d, 'GEMINI.md');
+    expect(() => p.publish(d.id, { [a.artifactId]: 'overwrite-with-shared', [b.artifactId]: 'overwrite-with-shared' })).toThrow(/同一目标|冲突/);
+    expect(read('AGENTS.md')).toBe('native');
+    expect(db.getRows('SELECT * FROM publications')).toHaveLength(0);
+  });
+  it('allows explicitly choosing only one source among colliding rules', () => {
+    write('CLAUDE.md', 'claude');
+    write('GEMINI.md', 'gemini');
+    write('AGENTS.md', 'native');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const a = entry(d, 'CLAUDE.md');
+    p.publish(d.id, { [a.artifactId]: 'overwrite-with-shared' });
+    expect(read('AGENTS.md')).toBe('claude');
+    expect(read('GEMINI.md')).toBe('gemini');
+  });
+  it.each(['source', 'target'] as const)('rejects %s drift after preview', side => {
+    write('CLAUDE.md', 'shared');
+    write('AGENTS.md', 'native');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'CLAUDE.md');
+    write(side === 'source' ? 'CLAUDE.md' : 'AGENTS.md', 'changed since preview');
+    expect(() => p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' })).toThrow(/变化|重新预览/);
+    expect(read('AGENTS.md')).toBe(side === 'source' ? 'native' : 'changed since preview');
+    expect(db.getRows('SELECT * FROM publications')).toHaveLength(0);
+  });
+  it('never treats manual-merge as overwrite', () => {
+    write('CLAUDE.md', 'shared');
+    write('AGENTS.md', 'native');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'CLAUDE.md');
+    expect(() => p.publish(d.id, { [e.artifactId]: 'manual-merge' })).toThrow(/人工合并|合并结果/);
+    expect(read('AGENTS.md')).toBe('native');
+  });
+  it.each([['claude-code', '.claude'], ['codex', '.agents']] as const)('publishes %s skills into the documented project path', (agent, folder) => {
+    skill();
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', agent);
+    const e = entry(d, 'my-skill');
+    expect(e.path).toBe(path.join(dir, folder, 'skills', 'my-skill'));
+    p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    expect(read(`${folder}/skills/my-skill/SKILL.md`)).toBe('skill body');
+    expect(read(`${folder}/skills/my-skill/assets/icon.png`)).toBe('resource bytes');
+  });
+  it('same source and native skill is a harmless no-op', () => {
+    skill('.agents/skills/my-skill');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'my-skill');
+    p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    expect(read('.agents/skills/my-skill/SKILL.md')).toBe('skill body');
+    expect(db.getRows('SELECT * FROM publications')).toHaveLength(0);
+  });
+  it.each(['antigravity', 'zcode', 'workbuddy'] as AgentId[])('does not claim an unverified %s skill path', agent => {
+    skill();
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', agent);
+    const e = entry(d, 'my-skill');
+    expect(e.publishable).toBe(false);
+    expect(e.reason).toMatch(/未验证|不支持/);
+    expect(() => p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' })).toThrow();
+    expect(read('shared/my-skill/SKILL.md')).toBe('skill body');
+  });
+  it('rollback after publisher restart restores the persisted target and original bytes', () => {
+    write('CLAUDE.md', 'shared');
+    write('AGENTS.md', 'native');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'CLAUDE.md');
+    const r = p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    new ConfigPublisher(db).rollback(r.id);
+    expect(read('AGENTS.md')).toBe('native');
+    expect(fs.existsSync(path.join(dir, '.workbuddy.md'))).toBe(false);
+    expect(db.getRows('SELECT * FROM publications')).toHaveLength(0);
+  });
+  it('rollback of a first publication removes only its new target', () => {
+    write('CLAUDE.md', 'shared');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'CLAUDE.md');
+    const r = p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    new ConfigPublisher(db).rollback(r.id);
+    expect(fs.existsSync(path.join(dir, 'AGENTS.md'))).toBe(false);
+    expect(read('CLAUDE.md')).toBe('shared');
+  });
+  it('rollback rejects native edits after publication', () => {
+    write('CLAUDE.md', 'shared');
+    write('AGENTS.md', 'native');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'CLAUDE.md');
+    const r = p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    write('AGENTS.md', 'new user edit');
+    expect(() => new ConfigPublisher(db).rollback(r.id)).toThrow(/变化|冲突/);
+    expect(read('AGENTS.md')).toBe('new user edit');
+  });
+  it('database failure restores all files and publication baselines', () => {
+    write('CLAUDE.md', 'shared');
+    write('AGENTS.md', 'native');
+    skill();
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const rule = entry(d, 'CLAUDE.md'), s = entry(d, 'my-skill');
+    vi.spyOn(db, 'transaction').mockImplementationOnce(() => { throw Error('injected database failure'); });
+    expect(() => p.publish(d.id, { [rule.artifactId]: 'overwrite-with-shared', [s.artifactId]: 'overwrite-with-shared' })).toThrow('injected database failure');
+    expect(read('AGENTS.md')).toBe('native');
+    expect(fs.existsSync(path.join(dir, '.agents/skills/my-skill'))).toBe(false);
+    expect(db.getRows('SELECT * FROM publications')).toHaveLength(0);
+    expect(new ConfigPublisher(db).previewPublish('p1', 'codex').entries.find(x => x.artifactId === rule.artifactId)?.lastPublishedHash).toBeNull();
+  });
+  it('three-way baseline belongs to the destination agent', () => {
+    write('CLAUDE.md', 'a');
+    skill();
+    const p = new ConfigPublisher(db);
+    let d = p.previewPublish('p1', 'codex');
+    let e = entry(d, 'my-skill');
+    p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    d = p.previewPublish('p1', 'claude-code');
+    e = entry(d, 'my-skill');
+    expect(e.lastPublishedHash).toBeNull();
+  });
+  it('preview omits skill backups and keeps the shared source stable after publication', () => {
+    skill();
+    const p = new ConfigPublisher(db);
+    let d = p.previewPublish('p1', 'codex');
+    let e = entry(d, 'my-skill');
+    p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    write('shared/my-skill/SKILL.md', 'next shared');
+    d = p.previewPublish('p1', 'codex');
+    const skills = d.entries.filter(e => e.kind === 'skill');
+    expect(skills).toHaveLength(1);
+    expect(skills[0].sourcePath).toBe(path.join(dir, 'shared/my-skill'));
+  });
+  it('legacy publications without a persisted target cannot guess a rollback path', () => {
+    write('CLAUDE.md', 'shared');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'CLAUDE.md');
+    db.run('INSERT INTO publications (id, artifact_id, diff_id, applied_at, backup_path) VALUES (?,?,?,?,?)', 'legacy', e.artifactId, 'legacy-diff', new Date().toISOString(), null);
+    expect(() => p.rollback('legacy-diff')).toThrow(/旧|目标/);
+    expect(read('CLAUDE.md')).toBe('shared');
+  });
+  it('v2 databases migrate without inventing rollback metadata for legacy rows', () => {
+    db.close();
+    db = new SqliteDatabase(path.join(dir, 'legacy.db'));
+    for (const migration of MIGRATIONS.filter(m => m.version <= 2)) {
+      db.exec(migration.up);
+      db.run('INSERT INTO schema_migrations (version, applied_at) VALUES (?,?)', migration.version, new Date().toISOString());
     }
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch {
-      /* ignore */
-    }
+    seedProject(db, 'p1', dir);
+    db.run(`INSERT INTO shared_artifacts (id,project_id,kind,name,scope,created_at) VALUES (?,?,?,?,?,?)`, 'old-artifact', 'p1', 'rule', 'CLAUDE.md', 'project', new Date().toISOString());
+    db.run('INSERT INTO publications (id,artifact_id,diff_id,applied_at) VALUES (?,?,?,?)', 'old-pub', 'old-artifact', 'old-diff', new Date().toISOString());
+    applyMigrations(db);
+    applyMigrations(db);
+    expect(db.getRow('SELECT target_path,target_agent_id,shared_hash FROM publications WHERE id = ?', 'old-pub')).toMatchObject({ target_path: null, target_agent_id: null, shared_hash: null });
+    expect(() => new ConfigPublisher(db).rollback('old-diff')).toThrow(/旧发布/);
   });
-
-  it("(a) new publish creates native file from shared content", () => {
-    fs.writeFileSync(path.join(dir, "CLAUDE.md"), "SHARED CONTENT");
-    const inventory = new ConfigInventory(db);
-    inventory.scanArtifacts("p1");
-    const publisher = new ConfigPublisher(db);
-    const diff = publisher.previewPublish("p1", AGENT);
-    expect(diff.entries).toHaveLength(1);
-    expect(diff.entries[0].status).toBe("new");
-
-    const receipt = publisher.publish(diff.id, { [diff.entries[0].path]: "overwrite-with-shared" });
-    const native = path.join(dir, ".antigravity.md");
-    expect(fs.existsSync(native)).toBe(true);
-    expect(fs.readFileSync(native, "utf8")).toBe("SHARED CONTENT");
-    expect(receipt.diffId).toBe(diff.id);
-    // 发布记录已写入
-    const pubs = db.getRows("SELECT * FROM publications WHERE diff_id = ?", diff.id);
-    expect(pubs).toHaveLength(1);
+  it('directory replacement restores every original resource if database commit fails', () => {
+    skill();
+    write('.agents/skills/my-skill/SKILL.md', 'original skill');
+    write('.agents/skills/my-skill/old.txt', 'original resource');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'my-skill');
+    vi.spyOn(db, 'transaction').mockImplementationOnce(() => { throw Error('commit failed'); });
+    expect(() => p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' })).toThrow('commit failed');
+    expect(read('.agents/skills/my-skill/SKILL.md')).toBe('original skill');
+    expect(read('.agents/skills/my-skill/old.txt')).toBe('original resource');
+    expect(fs.existsSync(path.join(dir, '.agents/skills/my-skill/assets/icon.png'))).toBe(false);
+    expect(read('shared/my-skill/SKILL.md')).toBe('skill body');
   });
-
-  it("(b) native externally modified before publish -> changed or conflict", () => {
-    fs.writeFileSync(path.join(dir, "CLAUDE.md"), "SHARED");
-    fs.writeFileSync(path.join(dir, ".antigravity.md"), "MODIFIED-BY-USER");
-    const publisher = new ConfigPublisher(db);
-    const diff = publisher.previewPublish("p1", AGENT);
-    expect(diff.entries).toHaveLength(1);
-    expect(["changed", "conflict"]).toContain(diff.entries[0].status);
+  it('rejects a junction or symlink in a native destination', () => {
+    skill();
+    fs.mkdirSync(path.join(dir, 'do-not-touch'));
+    write('do-not-touch/marker', 'keep');
+    fs.symlinkSync(path.join(dir, 'do-not-touch'), path.join(dir, '.agents'), process.platform === 'win32' ? 'junction' : 'dir');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'my-skill');
+    expect(e.publishable).toBe(false);
+    expect(() => p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' })).toThrow(/链接|junction/);
+    expect(read('do-not-touch/marker')).toBe('keep');
   });
-
-  it("(c) both sides changed -> conflict, overwrite-with-shared restores shared bytes", () => {
-    // 初始：shared=A，发布到 native（new）
-    fs.writeFileSync(path.join(dir, "CLAUDE.md"), "A");
-    const publisher = new ConfigPublisher(db);
-    const d1 = publisher.previewPublish("p1", AGENT);
-    publisher.publish(d1.id, { [d1.entries[0].path]: "overwrite-with-shared" });
-    expect(fs.readFileSync(path.join(dir, ".antigravity.md"), "utf8")).toBe("A");
-
-    // 两边同时改变：shared -> B，native -> C
-    fs.writeFileSync(path.join(dir, "CLAUDE.md"), "B");
-    fs.writeFileSync(path.join(dir, ".antigravity.md"), "C");
-
-    const d2 = publisher.previewPublish("p1", AGENT);
-    expect(d2.entries[0].status).toBe("conflict");
-
-    publisher.publish(d2.id, { [d2.entries[0].path]: "overwrite-with-shared" });
-    expect(fs.readFileSync(path.join(dir, ".antigravity.md"), "utf8")).toBe("B");
+  it('does not overwrite an unselected target when its native parent is invalid', () => {
+    write('CLAUDE.md', 'shared');
+    write('AGENTS.md', 'native');
+    skill();
+    write('.agents', 'not a directory');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const rule = entry(d, 'CLAUDE.md'), s = entry(d, 'my-skill');
+    expect(() => p.publish(d.id, { [rule.artifactId]: 'overwrite-with-shared', [s.artifactId]: 'overwrite-with-shared' })).toThrow();
+    expect(read('AGENTS.md')).toBe('native');
+    expect(db.getRows('SELECT * FROM publications')).toHaveLength(0);
   });
-
-  it("(d) write failure mid-way leaves no partial/corrupt state and rollback works", () => {
-    // rule 产物（会被先写入）+ 一个 skill 产物（写入会失败）
-    fs.writeFileSync(path.join(dir, "CLAUDE.md"), "SHARED");
-    fs.writeFileSync(path.join(dir, ".antigravity.md"), "ORIGINAL"); // rule 原生预存在
-    fs.mkdirSync(path.join(dir, "my-skill"));
-    fs.writeFileSync(path.join(dir, "my-skill", "SKILL.md"), "skill body");
-
-    // 把 .agent-workbench/skills 建成一个【文件】，使 skill 原生目标目录
-    // 的父级不是目录，从而在 copyDir 时稳定抛 ENOTDIR（跨平台可靠）。
-    fs.mkdirSync(path.join(dir, ".agent-workbench"), { recursive: true });
-    fs.writeFileSync(path.join(dir, ".agent-workbench", "skills"), "i-am-a-file-not-dir");
-
-    const publisher = new ConfigPublisher(db);
-    // 先成功发布一次 rule，得到可回滚的 receipt
-    const dr = publisher.previewPublish("p1", AGENT);
-    const rulePath = dr.entries.find((e) => e.path.endsWith(".antigravity.md"))!.path;
-    const receipt1 = publisher.publish(dr.id, { [rulePath]: "overwrite-with-shared" });
-    expect(fs.readFileSync(path.join(dir, ".antigravity.md"), "utf8")).toBe("SHARED");
-
-    // 再次发布，但 skill 写入会失败
-    const dr2 = publisher.previewPublish("p1", AGENT);
-    const skillEntry = dr2.entries.find((e) => e.path.includes("skills" + path.sep + "my-skill"))!;
-    expect(skillEntry).toBeTruthy();
-
-    let threw = false;
-    try {
-      publisher.publish(dr2.id, { [skillEntry.path]: "overwrite-with-shared" });
-    } catch {
-      threw = true;
-    }
-    expect(threw).toBe(true);
-
-    // 失败后 rule 原生文件保持发布后的内容（未被损坏/部分写入）
-    expect(fs.readFileSync(path.join(dir, ".antigravity.md"), "utf8")).toBe("SHARED");
-    // 失败的发布没有留下 publications 记录（事务已回滚）
-    expect(db.getRows("SELECT * FROM publications WHERE diff_id = ?", dr2.id)).toHaveLength(0);
-
-    // 回滚先前的成功发布仍然可用
-    publisher.rollback(receipt1.id);
-    expect(fs.readFileSync(path.join(dir, ".antigravity.md"), "utf8")).toBe("ORIGINAL");
-    expect(db.getRows("SELECT * FROM publications WHERE diff_id = ?", receipt1.id)).toHaveLength(0);
-  });
-
-  it("(e) rollback restores byte-identical original", () => {
-    fs.writeFileSync(path.join(dir, "CLAUDE.md"), "NEW-SHARED");
-    fs.writeFileSync(path.join(dir, ".antigravity.md"), "ORIGINAL-CONTENT");
-    const origHash = sha256File(path.join(dir, ".antigravity.md"));
-
-    const publisher = new ConfigPublisher(db);
-    const diff = publisher.previewPublish("p1", AGENT);
-    const receipt = publisher.publish(diff.id, { [diff.entries[0].path]: "overwrite-with-shared" });
-    expect(fs.readFileSync(path.join(dir, ".antigravity.md"), "utf8")).toBe("NEW-SHARED");
-
-    publisher.rollback(receipt.id);
-    expect(fs.existsSync(path.join(dir, ".antigravity.md"))).toBe(true);
-    expect(sha256File(path.join(dir, ".antigravity.md"))).toBe(origHash);
-    expect(db.getRows("SELECT * FROM publications WHERE diff_id = ?", diff.id)).toHaveLength(0);
-  });
-
-  it("(f) skill directory with a resource file is copied when published (uses fixture)", () => {
-    copyDir(FIXTURE, dir);
-    const inventory = new ConfigInventory(db);
-    const artifacts = inventory.scanArtifacts("p1");
-    const skill = artifacts.find((a) => a.kind === "skill" && a.name === "my-skill");
-    expect(skill).toBeTruthy();
-
-    const publisher = new ConfigPublisher(db);
-    const diff = publisher.previewPublish("p1", "claude-code");
-    const skillEntry = diff.entries.find((e) => e.path.endsWith(path.join("skills", "my-skill")))!;
-    expect(skillEntry).toBeTruthy();
-
-    publisher.publish(diff.id, { [skillEntry.path]: "overwrite-with-shared" });
-    const nativeSkill = path.join(dir, ".agent-workbench", "skills", "my-skill");
-    expect(fs.existsSync(path.join(nativeSkill, "SKILL.md"))).toBe(true);
-    expect(fs.existsSync(path.join(nativeSkill, "icon.png"))).toBe(true);
-    // 资源内容原样保留
-    expect(fs.readFileSync(path.join(nativeSkill, "icon.png"), "utf8")).toBe("PNG-ICON-BYTES-SAMPLE");
+  it('a consumed preview cannot be replayed', () => {
+    write('CLAUDE.md', 'shared');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'codex');
+    const e = entry(d, 'CLAUDE.md');
+    p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    expect(() => p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' })).toThrow(/已应用|未知/);
   });
 });

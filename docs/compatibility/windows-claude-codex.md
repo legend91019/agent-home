@@ -1,5 +1,7 @@
 # Windows 兼容性报告：Claude Code 与 Codex 适配器
 
+> 2026-10-27 更新：下文是初始探测记录。Claude Code 已补齐本地 transcript 发现、可见历史读取和 CLI 启动，当前能力及验证边界以 [Claude 深度适配器说明](claude-deep-adapter.md) 为准。
+
 > 本文档记录"Agent Workbench"在 **Windows** 环境下对 Claude Code 与 Codex 两类适配器的
 > 能力探测结果与诚实降级说明。所有未在本环境验证的能力一律标记为 `unknown` 或 `unsupported`，
 > **绝不谎报 `supported`**。无法程序化读取时以"手工导出导入"作为回退，而不是声称拥有实时访问。

@@ -1,13 +1,15 @@
 /**
  * Claude Code 适配器。
  *
- * 设计原则：能力协商。任何本环境无法验证的能力一律标记为 unknown（或 unsupported），
- * 绝不谎报 supported。当程序化读取不可用时，提供「手工导出导入」回退
- * （parseClaudeSession / importSessionFromFile），而不是声称拥有实时访问。
+ * 读取官方文档化的本地 transcript，通过现有登录的 CLI print 模式启动任务。
+ * 保留手工 JSON/JSONL 导入回退；进程完成不等于模型目标已被验收。
  * 绝不读取隐藏推理、凭据或第三方私有数据库。
  */
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, delimiter } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   type AgentId,
   type CapabilityReport,
@@ -25,13 +27,13 @@ import {
   type StartTaskInput,
 } from "./types";
 
-/** 截断摘要，避免把大块输入/输出塞进事件列表。 */
+/** 契约字段虽名为 Summary，交接必须保留完整工具原文。 */
 function summarize(value: unknown): string {
   if (value === undefined || value === null) return "";
   if (typeof value === "string") return value;
   try {
     const s = JSON.stringify(value);
-    return s.length > 500 ? `${s.slice(0, 500)}…` : s;
+    return s;
   } catch {
     return String(value);
   }
@@ -118,7 +120,10 @@ export function parseClaudeSession(json: unknown): VisibleEvent[] {
     if (!msg || typeof msg !== "object") {
       throw new WorkbenchError("invalid_data", `Claude 消息 #${index} 不是对象`);
     }
-    const m = msg as { role?: unknown; content?: unknown; timestamp?: unknown; uuid?: unknown; id?: unknown };
+    const record = msg as Record<string, unknown>;
+    // Native JSONL includes bookkeeping records; only message envelopes are visible.
+    if (typeof record.type === "string" && !["user", "assistant", "system"].includes(record.type)) continue;
+    const m = (record.message && typeof record.message === "object" ? { ...record, ...record.message } : record) as { role?: unknown; content?: unknown; timestamp?: unknown; uuid?: unknown; id?: unknown };
     const role = m.role;
     if (role !== "user" && role !== "assistant" && role !== "system") {
       throw new WorkbenchError(
@@ -130,7 +135,7 @@ export function parseClaudeSession(json: unknown): VisibleEvent[] {
       throw new WorkbenchError("invalid_data", `Claude 消息 #${index} 缺少 content`);
     }
     const timestamp =
-      typeof m.timestamp === "string" ? m.timestamp : new Date().toISOString();
+      typeof m.timestamp === "string" ? m.timestamp : "1970-01-01T00:00:00.000Z";
     const { text, toolCalls } = extractContent(m.content);
     const nativeId =
       typeof m.uuid === "string"
@@ -165,18 +170,47 @@ export function importSessionFromFile(filePath: string): VisibleEvent[] {
   } catch {
     parsed = parseJsonl(trimmed);
   }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "type" in parsed) parsed = [parsed];
   return parseClaudeSession(parsed);
 }
 
 export class ClaudeAdapter extends BaseAdapter implements AgentAdapter {
   readonly id: AgentId = "claude-code";
   readonly displayName = "Claude Code";
+  private readonly configDirectory: string;
+  private readonly command: { file: string; args: string[] };
+  private readonly sessionFiles = new Map<string, string>();
+  private readonly completions = new Map<string, Promise<"succeeded" | "failed" | "cancelled">>();
+
+  constructor(options: { configDirectory?: string; command?: { file: string; args: string[] } } = {}) {
+    super();
+    this.configDirectory = options.configDirectory ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+    this.command = options.command ?? this.resolveCommand();
+  }
+
+  private resolveCommand(): { file: string; args: string[] } {
+    if (process.platform === "win32") {
+      for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+        if (existsSync(join(dir, "claude.exe"))) return { file: join(dir, "claude.exe"), args: [] };
+        const native = join(dir, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+        if (existsSync(native)) return { file: native, args: [] };
+        const cli = join(dir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+        if (existsSync(cli)) return { file: process.execPath, args: [cli] };
+      }
+    }
+    return { file: "claude", args: [] };
+  }
+
+  authenticated(): boolean | null {
+    const result = spawnSync(this.command.file, [...this.command.args, "auth", "status"], { encoding: "utf8", timeout: 5000, windowsHide: true, env: { ...process.env, CLAUDE_CONFIG_DIR: this.configDirectory } });
+    try { return JSON.parse(result.stdout).loggedIn === true; } catch { return null; }
+  }
 
   /** 运行 `claude --version`；未安装时返回 null。Windows 上的 npm shim 需要 shell。 */
   versionHint(): string | null {
     const attempt = (shell: boolean): string | null => {
       try {
-        const res = spawnSync("claude", ["--version"], {
+        const res = spawnSync(this.command.file, [...this.command.args, "--version"], {
           encoding: "utf8",
           timeout: 5000,
           shell,
@@ -188,7 +222,7 @@ export class ClaudeAdapter extends BaseAdapter implements AgentAdapter {
         return null;
       }
     };
-    return attempt(false) ?? attempt(true);
+    return attempt(false);
   }
 
   async probe(_projectPath: string): Promise<CapabilityReport> {
@@ -199,8 +233,8 @@ export class ClaudeAdapter extends BaseAdapter implements AgentAdapter {
     const u = (_cap: string) =>
       `${version} 已安装；该能力在沙箱中未做真实验证`;
     const caps: CapabilityReportEntry[] = [
-      this.entry("sessions.list", "unknown", u("sessions.list"), { version }),
-      this.entry("sessions.readVisible", "unknown", u("sessions.readVisible"), { version }),
+      this.entry("sessions.list", "supported", "读取官方文档化 projects JSONL transcript", { version }),
+      this.entry("sessions.readVisible", "supported", "保留本地 transcript 可见消息与完整工具内容", { version }),
       this.entry("memory.readVisible", "unknown", u("memory.readVisible"), { version }),
       this.entry(
         "config.read",
@@ -214,7 +248,7 @@ export class ClaudeAdapter extends BaseAdapter implements AgentAdapter {
         "CLAUDE.md 是可写的项目文件，可通过文件系统发布",
         { version },
       ),
-      this.entry("tasks.start", "unknown", u("tasks.start"), { version }),
+      this.entry("tasks.start", this.authenticated() === true ? "supported" : "unknown", "使用现有 CLI 登录启动 print 模式；不绕过权限", { version }),
       typeof (this as unknown as { interrupt?: unknown }).interrupt === "function"
         ? this.entry("tasks.interrupt", "unknown", u("tasks.interrupt"), { version })
         : this.entry(
@@ -236,22 +270,32 @@ export class ClaudeAdapter extends BaseAdapter implements AgentAdapter {
       agentId: this.id,
       agentName: this.displayName,
       installed: true,
-      authenticated: null,
+      authenticated: this.authenticated(),
       version,
       capabilities: caps,
       checkedAt: new Date().toISOString(),
     };
   }
 
-  /** 不伪造会话列表：本环境无法验证真实列表来源。 */
-  async listSessions(_projectPath: string): Promise<SessionRef[]> {
-    return [];
+  /** 只读取指定项目的 transcript，不扫描凭据、数据库或其他项目。 */
+  async listSessions(projectPath: string): Promise<SessionRef[]> {
+    const dir = join(this.configDirectory, "projects", projectPath.replace(/[^a-zA-Z0-9]/g, "-"));
+    if (!existsSync(dir)) return [];
+    const sessions: SessionRef[] = [];
+    for (const file of readdirSync(dir).filter((name) => name.endsWith(".jsonl"))) {
+      const path = join(dir, file);
+      const events = importSessionFromFile(path);
+      if (!events.length) continue;
+      const id = file.slice(0, -6);
+      this.sessionFiles.set(id, path);
+      sessions.push({ agentId: this.id, id, title: events.find((e) => e.role === "user")?.text?.slice(0, 120), messageCount: events.length, startedAt: events[0].timestamp, updatedAt: events.at(-1)?.timestamp, nativeProjectPath: projectPath });
+    }
+    return sessions.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
   }
 
   async *readVisibleSession(session: SessionRef): AsyncIterable<VisibleEvent> {
-    // 实时会话读取在沙箱中未验证。若用户把导出文件路径作为 session.id 手工提供，
-    // 则通过文件回退读取（不读取任何隐藏推理/凭据）。
-    const candidate = session.id;
+    if (session.agentId !== this.id) throw new WorkbenchError("session_unavailable", "会话不属于 Claude Code");
+    const candidate = this.sessionFiles.get(session.id) ?? (session.nativeProjectPath && /^[a-zA-Z0-9_-]+$/.test(session.id) ? join(this.configDirectory, "projects", session.nativeProjectPath.replace(/[^a-zA-Z0-9]/g, "-"), `${session.id}.jsonl`) : session.id);
     if (
       candidate &&
       (candidate.endsWith(".json") || candidate.endsWith(".jsonl")) &&
@@ -263,15 +307,49 @@ export class ClaudeAdapter extends BaseAdapter implements AgentAdapter {
     }
     throw new WorkbenchError(
       "session_unavailable",
-      "Claude 实时会话读取在沙箱中未验证；请使用手工导出导入（importSessionFromFile）。",
+      "Claude 本地会话文件不可用；可导入用户导出的 JSON/JSONL 文件。",
     );
   }
 
-  async startTask(_input: StartTaskInput): Promise<RunHandle> {
-    // 沙箱未验证 CLI 任务启动（需要鉴权且无法确认环境），绝不假装成功。
-    throw new WorkbenchError(
-      "not_authenticated",
-      "Claude 任务启动在沙箱中未验证；未做真实 CLI 调用。",
-    );
+  async startTask(input: StartTaskInput): Promise<RunHandle> {
+    if (this.authenticated() !== true) throw new WorkbenchError("not_authenticated", "请先通过 Claude Code CLI 登录");
+    const nativeSessionId = input.sessionId ?? randomUUID();
+    if (!/^[a-zA-Z0-9_-]+$/.test(nativeSessionId)) throw new WorkbenchError("invalid_data", "Claude 会话 ID 非法");
+    const child = spawn(this.command.file, [...this.command.args, "-p", "--output-format", "stream-json", "--verbose", input.sessionId ? "--resume" : "--session-id", nativeSessionId], { cwd: input.projectPath, windowsHide: true, stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, CLAUDE_CONFIG_DIR: this.configDirectory } });
+    const runId = randomUUID();
+    let finish!: (state: "succeeded" | "failed" | "cancelled") => void;
+    this.completions.set(runId, new Promise((resolve) => { finish = resolve; }));
+    return new Promise((resolve, reject) => {
+      let initialized = false;
+      let resultFailed = false;
+      let buffer = "";
+      const fail = () => reject(new WorkbenchError("process_failed", "Claude CLI 在建立会话前退出"));
+      child.on("error", () => { finish("failed"); fail(); });
+      child.on("close", (code) => { finish(code === 0 && !resultFailed ? "succeeded" : "failed"); if (!initialized) fail(); });
+      child.stdin.on("error", () => { /* close/error handlers report process failure */ });
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        buffer += chunk;
+        let newline: number;
+        while ((newline = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "result" && event.is_error === true) resultFailed = true;
+            if (!initialized && event.type === "system" && event.subtype === "init" && event.session_id === nativeSessionId) {
+              initialized = true;
+              resolve({ runId, nativeSessionId, pid: child.pid, startedAt: new Date().toISOString() });
+            }
+          } catch { /* ignore non-protocol diagnostics */ }
+        }
+      });
+      child.stdin.end(input.handoffPath ? `请先读取以下 UTF-8 文件，作为完整交接历史：${JSON.stringify(input.handoffPath)}\n然后继续执行目标：\n${input.goal}` : input.goal);
+    });
+  }
+
+  async waitForCompletion(handle: RunHandle): Promise<"succeeded" | "failed" | "cancelled"> {
+    const completion = this.completions.get(handle.runId);
+    if (!completion) throw new WorkbenchError("session_unavailable", "Claude 运行句柄不在当前进程中");
+    return completion;
   }
 }

@@ -272,6 +272,7 @@ export class WorkflowScheduler {
   /* --------------------------- 暂停 / 恢复 --------------------------- */
 
   pauseScheduling(workflowRunId: string): void {
+    if (!this.getWorkflow(workflowRunId)) throw new Error(`工作流不存在: ${workflowRunId}`);
     this.db.run(
       "UPDATE workflows SET paused = 1, updated_at = ? WHERE id = ?",
       new Date().toISOString(),
@@ -280,6 +281,7 @@ export class WorkflowScheduler {
   }
 
   resumeScheduling(workflowRunId: string): void {
+    if (!this.getWorkflow(workflowRunId)) throw new Error(`工作流不存在: ${workflowRunId}`);
     this.db.run(
       "UPDATE workflows SET paused = 0, updated_at = ? WHERE id = ?",
       new Date().toISOString(),
@@ -323,8 +325,8 @@ export class WorkflowScheduler {
 
   /**
    * 为一个节点启动一次运行：
-   *  - 先通过 TaskRuntime.startRun 取得 runId（其生命周期/状态机由 TaskRuntime 负责）。
-   *  - 若节点写入仓库，则在启动后再创建 worktree 工作区，并回填 runs.workspace_id。
+   *  - 写入节点必须先创建 worktree，再在该目录启动 Agent。
+   *  - Run 创建后回填工作区关联；启动失败的空工作区留给恢复界面处置。
    */
   private async startNodeRun(
     taskId: string,
@@ -332,17 +334,21 @@ export class WorkflowScheduler {
     projectId: string,
     workflowId: string,
   ): Promise<RunDTO> {
-    const run = await this.tasks.startRun(taskId, node.agentId, {});
-
+    let workspaceId: string | undefined;
     if (node.writesRepo) {
       const baseCommit = this.resolveBaseCommit(projectId, this.baseCommitOverride.get(workflowId));
-      const ws = this.workspaces.createBranchWorkspace(projectId, run.id, baseCommit, {
-        branch: `wf-${workflowId}-${node.id}`,
+      const ws = this.workspaces.createBranchWorkspace(projectId, null, baseCommit, {
+        branch: `wf-${workflowId}-${node.id}-${crypto.randomUUID().slice(0, 8)}`,
       });
-      // 回填工作区到 run：TaskRuntime 不提供该写入口，但允许直接 UPDATE runs。
-      this.db.run("UPDATE runs SET workspace_id = ? WHERE id = ?", ws.id, run.id);
+      workspaceId = ws.id;
     }
-
+    const run = await this.tasks.startRun(taskId, node.agentId, {
+      workspaceId,
+      goalOverride: node.input,
+    });
+    if (workspaceId) {
+      this.db.run("UPDATE workspaces SET run_id = ? WHERE id = ?", run.id, workspaceId);
+    }
     return run;
   }
 

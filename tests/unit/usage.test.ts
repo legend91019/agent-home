@@ -146,6 +146,15 @@ describe("UsageAggregator.ingestUsage + getUsage", () => {
     expect(summary.invoked).toContain("my-skill");
   });
 
+  it("项目 skill 调用统计不混入其他项目的运行事件", () => {
+    const { db, agg } = base();
+    seedProject(db, "p2", "/tmp/other-project");
+    seedRun(db, "r-other", "t-other", "p2");
+    agg.recordSkillInvocation("r-other", "other-only-skill");
+    expect(agg.getSkillUsage({ projectId: "p1" }).invoked).not.toContain("other-only-skill");
+    expect(agg.getSkillUsage({ projectId: "p2" }).invoked).toContain("other-only-skill");
+  });
+
   it("byAgent 按 agent 聚合且 null 保持 null", () => {
     const { agg } = base();
     agg.ingestUsage({

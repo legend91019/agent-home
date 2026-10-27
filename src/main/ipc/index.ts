@@ -48,6 +48,12 @@ export async function handle(
       return handoff.searchHandoff(ctx, input);
     case "handoff.integrity":
       return handoff.integrityHandoff(ctx, input);
+    case "handoff.summary":
+      return handoff.summaryHandoff(ctx, input);
+    case "handoff.findings":
+      return handoff.findingsHandoff(ctx, input);
+    case "handoff.edit":
+      return handoff.editHandoff(ctx, input);
     case "handoff.consume":
       return handoff.consumeHandoff(ctx, input);
     case "tasks.list":
@@ -62,10 +68,18 @@ export async function handle(
       return tasks.runState(ctx, input);
     case "workflow.start":
       return workflow.startWorkflow(ctx, input);
+    case "workflow.get":
+      return workflow.getWorkflow(ctx, input);
     case "workflow.advance":
       return workflow.advanceWorkflow(ctx, input);
     case "workflow.pause":
       return workflow.pauseWorkflow(ctx, input);
+    case "workflow.resume":
+      return workflow.resumeWorkflow(ctx, input);
+    case "workflow.approve":
+      return workflow.approveWorkflowNode(ctx, input);
+    case "workflow.retry":
+      return workflow.retryWorkflowNode(ctx, input);
     case "merge.create":
       return merge.createMerge(ctx, input);
     case "merge.refresh":

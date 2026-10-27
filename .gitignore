@@ -7,3 +7,4 @@ node_modules/.vitest-cache/
 agent-workbench.db
 dist/
 out/
+.workbuddy/

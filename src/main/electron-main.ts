@@ -8,10 +8,14 @@
  */
 import { app, BrowserWindow, ipcMain } from "electron";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createContext } from "./services";
 import { handle } from "./ipc";
 import { IPC_CHANNELS, IpcChannel } from "../shared/contracts";
-import { toWorkbenchError } from "../shared/errors";
+import { WorkbenchError, toWorkbenchError } from "../shared/errors";
+
+declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
+declare const MAIN_WINDOW_VITE_NAME: string;
 
 // squirrel 安装/卸载事件：首次启动时应尽早退出以避免重复实例。
 try {
@@ -22,6 +26,7 @@ try {
 }
 
 let mainWindow: BrowserWindow | null = null;
+let trustedRendererUrl = "";
 
 const SINGLE_INSTANCE = app.requestSingleInstanceLock();
 if (!SINGLE_INSTANCE) {
@@ -36,19 +41,24 @@ function createWindow(): void {
     minHeight: 720,
     backgroundColor: "#1e1e2e",
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   });
 
-  if (process.env.MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    void mainWindow.loadURL(process.env.MAIN_WINDOW_VITE_DEV_SERVER_URL);
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (url !== trustedRendererUrl) event.preventDefault();
+  });
+  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+    trustedRendererUrl = MAIN_WINDOW_VITE_DEV_SERVER_URL;
+    void mainWindow.loadURL(trustedRendererUrl);
   } else {
-    void mainWindow.loadFile(
-      path.join(__dirname, `../renderer/${process.env.MAIN_WINDOW_VITE_NAME}/index.html`),
-    );
+    const rendererPath = path.join(__dirname, `renderer/${MAIN_WINDOW_VITE_NAME}/index.html`);
+    trustedRendererUrl = pathToFileURL(rendererPath).toString();
+    void mainWindow.loadFile(rendererPath);
   }
 
   mainWindow.on("closed", () => {
@@ -59,8 +69,11 @@ function createWindow(): void {
 function registerIpc(): void {
   const ctx = createContext();
   for (const channel of IPC_CHANNELS) {
-    ipcMain.handle(channel, async (_event, input: unknown) => {
+    ipcMain.handle(channel, async (event, input: unknown) => {
       try {
+        if (event.sender !== mainWindow?.webContents || event.senderFrame?.url !== trustedRendererUrl) {
+          throw new WorkbenchError("permission_denied", "IPC 请求不来自工作台窗口");
+        }
         return await handle(ctx, channel as IpcChannel, input);
       } catch (err) {
         // 跨进程边界：只把结构化错误抛给渲染层，绝不泄露内部堆栈。

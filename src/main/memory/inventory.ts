@@ -65,7 +65,8 @@ export class MemoryInventory {
     );
     for (const row of rows) {
       const dto = this.rowToDto(row);
-      bySource.set(dto.source, dto);
+      const live = bySource.get(dto.source);
+      if (!live || live.originalText === dto.originalText) bySource.set(dto.source, dto);
     }
 
     return Array.from(bySource.values());
@@ -107,7 +108,32 @@ export class MemoryInventory {
 
   getEntry(id: string): MemoryEntryDTO | null {
     const row = this.db.getRow("SELECT * FROM memory_entries WHERE id = ?", id);
-    return row ? this.rowToDto(row) : null;
+    if (row) return this.rowToDto(row);
+    if (!id.startsWith("native:")) return null;
+    for (const project of this.registry.listProjects()) {
+      for (const agentId of ["claude-code", "codex"] as const) {
+        for (const source of nativeMemoryPaths(project.path, agentId)) {
+          const nativeId = "native:" + crypto.createHash("sha256").update(source).digest("hex");
+          if (nativeId !== id) continue;
+          try {
+            if (!fs.statSync(source).isFile()) return null;
+            return {
+              id,
+              agentId,
+              projectId: project.id,
+              source,
+              originalText: fs.readFileSync(source, "utf8"),
+              scope: "project",
+              importedAt: new Date(0).toISOString(),
+              published: false,
+            };
+          } catch {
+            return null;
+          }
+        }
+      }
+    }
+    return null;
   }
 
   private safeProjectPath(projectId: string): string | null {

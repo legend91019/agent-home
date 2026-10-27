@@ -27,6 +27,44 @@ export function createPackage(
   return getSummary(db, handoffId);
 }
 
+/** 预览后逐项保存交接副本删改；未提交的旧删改保持有效。 */
+export function applyPackageEdits(
+  db: SqliteDatabase,
+  handoffId: string,
+  edits: HandoffEdit[],
+): HandoffSummary {
+  const row = db.getRow("SELECT consumed FROM handoffs WHERE id = ?", handoffId);
+  if (!row) throw new WorkbenchError("invalid_data", `交接包不存在: ${handoffId}`);
+  if (Number(row.consumed) === 1) throw new WorkbenchError("invalid_data", "已分发的交接包不可修改");
+  const indexes = new Set(
+    db.getRows("SELECT idx FROM handoff_messages WHERE handoff_id = ?", handoffId)
+      .map((entry) => Number(entry.idx)),
+  );
+  for (const edit of edits) {
+    if (!Number.isInteger(edit.eventIndex) || !indexes.has(edit.eventIndex)) {
+      throw new WorkbenchError("invalid_data", `交接消息序号不存在: ${edit.eventIndex}`);
+    }
+    if (edit.text !== null && typeof edit.text !== "string") {
+      throw new WorkbenchError("invalid_data", "交接副本文本格式错误");
+    }
+    if (edit.removeAttachments && !Array.isArray(edit.removeAttachments)) {
+      throw new WorkbenchError("invalid_data", "附件删改格式错误");
+    }
+  }
+  db.transaction((tx) => {
+    for (const edit of edits) {
+      tx.run(
+        "INSERT OR REPLACE INTO handoff_edits (handoff_id, idx, text, removed_attachments) VALUES (?, ?, ?, ?)",
+        handoffId,
+        edit.eventIndex,
+        edit.text,
+        JSON.stringify(edit.removeAttachments ?? []),
+      );
+    }
+  });
+  return getSummary(db, handoffId);
+}
+
 export function getSummary(db: SqliteDatabase, handoffId: string): HandoffSummary {
   const row = db.getRow("SELECT * FROM handoffs WHERE id = ?", handoffId);
   if (!row) throw new WorkbenchError("invalid_data", `交接包不存在: ${handoffId}`);
@@ -56,8 +94,9 @@ export function consumePackage(
   handoffId: string,
   targetAgentId: AgentId,
 ): void {
-  const row = db.getRow("SELECT id FROM handoffs WHERE id = ?", handoffId);
+  const row = db.getRow("SELECT id, consumed FROM handoffs WHERE id = ?", handoffId);
   if (!row) throw new WorkbenchError("invalid_data", `交接包不存在: ${handoffId}`);
+  if (Number(row.consumed) === 1) throw new WorkbenchError("conflict", "交接包已分发");
   db.run(
     "UPDATE handoffs SET target_agent_id = ?, consumed = 1 WHERE id = ?",
     targetAgentId,

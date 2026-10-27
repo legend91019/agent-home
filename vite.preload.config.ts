@@ -1,11 +1,10 @@
 import { defineConfig } from "vite";
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-import builtinModules from "builtin-modules";
+import { builtinModules } from "node:module";
 
 export default defineConfig({
   build: {
     rollupOptions: {
-      external: ["electron", ...builtinModules],
+      external: ["electron", ...builtinModules, ...builtinModules.map((name) => `node:${name}`)],
     },
     emptyOutDir: false,
   },

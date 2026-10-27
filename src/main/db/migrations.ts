@@ -237,9 +237,20 @@ const V2 = `
 ALTER TABLE runs ADD COLUMN handoff_id TEXT;
 `;
 
+// 旧记录保留 NULL，回滚时拒绝猜测原生目标；新发布完整保存目标及恢复证据。
+const V3 = `
+ALTER TABLE publications ADD COLUMN target_agent_id TEXT;
+ALTER TABLE publications ADD COLUMN target_path TEXT;
+ALTER TABLE publications ADD COLUMN artifact_kind TEXT;
+ALTER TABLE publications ADD COLUMN shared_hash TEXT;
+ALTER TABLE publications ADD COLUMN native_before_hash TEXT;
+ALTER TABLE publications ADD COLUMN published_at_before TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, up: V1 },
   { version: 2, up: V2 },
+  { version: 3, up: V3 },
 ];
 
 export function applyMigrations(db: SqliteDatabase): number {

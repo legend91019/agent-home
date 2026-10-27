@@ -100,7 +100,8 @@ export class WorkspaceManager {
     let wsPath: string;
     if (opts?.path) {
       // 自定义路径必须位于受管理目录内，否则视为越权。
-      if (!path.resolve(opts.path).startsWith(path.resolve(managedRoot))) {
+      const relative = path.relative(path.resolve(managedRoot), path.resolve(opts.path));
+      if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
         throw new WorkbenchError("permission_denied", "工作区路径必须在受管理目录内");
       }
       wsPath = opts.path;
@@ -202,7 +203,7 @@ export class WorkspaceManager {
     const repoCwd = project ? project.path : wsPath;
 
     // 从主仓库执行 worktree remove，并强制（即便有残留）。
-    this.tryGit(["worktree", "remove", wsPath, "--force"], repoCwd);
+    this.runGit(["worktree", "remove", wsPath, "--force"], repoCwd);
 
     this.db.run("DELETE FROM workspaces WHERE id = ?", id);
   }

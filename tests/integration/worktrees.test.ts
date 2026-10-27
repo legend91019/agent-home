@@ -164,6 +164,16 @@ describe("WorkspaceManager (git worktree)", () => {
     fs.rmSync(outside, { recursive: true, force: true });
   });
 
+  it("路径仅共享受管理目录前缀时仍被拒绝", () => {
+    const sibling = path.join(repoPath, ".agent-workbench", "worktrees-escape", "branch");
+    try {
+      manager.createBranchWorkspace("p1", "run-escape", baseCommit, { path: sibling });
+      throw new Error("expected rejection");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "permission_denied" });
+    }
+  });
+
   it("(f) 干净且未保留的工作区可被删除", () => {
     const a = manager.createBranchWorkspace("p1", "run-6", baseCommit);
     createdPaths.push(a.path);

@@ -4,6 +4,9 @@ import { TaskRuntime } from "../../src/main/tasks/runtime";
 import { AdapterRegistry } from "../../src/main/adapters/registry";
 import { BaseAdapter, RunHandle, StartTaskInput } from "../../src/main/adapters/types";
 import { AgentId, CapabilityReport } from "../../src/shared/contracts";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 /** 受控的假适配器：记录 startTask/interrupt 调用，并声明可控能力。 */
 class FakeAdapter extends BaseAdapter {
@@ -13,6 +16,10 @@ class FakeAdapter extends BaseAdapter {
   lastInput: StartTaskInput | null = null;
   interruptCalled = false;
   readonly declareInterrupt: boolean;
+  private complete!: (status: "succeeded" | "failed" | "cancelled") => void;
+  private readonly completion = new Promise<"succeeded" | "failed" | "cancelled">((resolve) => {
+    this.complete = resolve;
+  });
 
   constructor(id: AgentId, declareInterrupt: boolean) {
     super();
@@ -67,6 +74,14 @@ class FakeAdapter extends BaseAdapter {
   async interrupt(): Promise<void> {
     this.interruptCalled = true;
   }
+
+  async waitForCompletion(): Promise<"succeeded" | "failed" | "cancelled"> {
+    return this.completion;
+  }
+
+  finish(status: "succeeded" | "failed" | "cancelled"): void {
+    this.complete(status);
+  }
 }
 
 describe("managed run（真实 TaskRuntime + 真实 AdapterRegistry）", () => {
@@ -120,7 +135,69 @@ describe("managed run（真实 TaskRuntime + 真实 AdapterRegistry）", () => {
 
     const rt = new TaskRuntime(db, adapters);
     const task = rt.createTask("p1", "t", "g");
+    db.run(
+      `INSERT INTO workspaces (id, project_id, run_id, base_commit, branch, path, created_at, retained)
+       VALUES (?, ?, NULL, ?, ?, ?, ?, 0)`,
+      "ws-9", "p1", "base", "test", "/tmp/ws-9", new Date().toISOString(),
+    );
     const run = await rt.startRun(task.id, "claude-code", { workspaceId: "ws-9" });
     expect(run.workspaceId).toBe("ws-9");
+    expect(fake.lastInput?.projectPath).toBe("/tmp/ws-9");
+  });
+
+  it("Agent 完成后 Run 和 Task 自动进入审查态", async () => {
+    const db = makeDb();
+    seedProject(db);
+    const adapters = new AdapterRegistry(db);
+    const fake = new FakeAdapter("codex", true);
+    adapters.register(fake);
+    const rt = new TaskRuntime(db, adapters);
+    const task = rt.createTask("p1", "完成状态", "目标");
+
+    const run = await rt.startRun(task.id, "codex");
+    fake.finish("succeeded");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(rt.getRun(run.id)?.status).toBe("succeeded");
+    expect(rt.getTask(task.id)?.status).toBe("review_required");
+  });
+
+  it("Agent 执行失败后 Run 和 Task 自动进入失败态", async () => {
+    const db = makeDb();
+    seedProject(db);
+    const adapters = new AdapterRegistry(db);
+    const fake = new FakeAdapter("codex", true);
+    adapters.register(fake);
+    const rt = new TaskRuntime(db, adapters);
+    const task = rt.createTask("p1", "失败状态", "目标");
+
+    const run = await rt.startRun(task.id, "codex");
+    fake.finish("failed");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(rt.getRun(run.id)?.status).toBe("failed");
+    expect(rt.getTask(task.id)?.status).toBe("failed");
+  });
+
+  it("启动目标 Agent 时明确传入用户已发布的项目记忆指导文件", async () => {
+    const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), "awb-guidance-"));
+    try {
+      const guidance = path.join(projectPath, ".agent-workbench", "memory", "claude-code.md");
+      fs.mkdirSync(path.dirname(guidance), { recursive: true });
+      fs.writeFileSync(guidance, "已审查的项目知识", "utf8");
+      const db = makeDb();
+      seedProject(db, "p1", projectPath);
+      const adapters = new AdapterRegistry(db);
+      const fake = new FakeAdapter("claude-code", false);
+      adapters.register(fake);
+      const rt = new TaskRuntime(db, adapters);
+      const task = rt.createTask("p1", "t", "修复登录");
+      await rt.startRun(task.id, "claude-code");
+      expect(fake.lastInput?.goal).toContain(guidance);
+      expect(fake.lastInput?.goal).toContain("修复登录");
+    } finally {
+      const root = path.resolve(os.tmpdir()) + path.sep;
+      if (path.resolve(projectPath).startsWith(root)) fs.rmSync(projectPath, { recursive: true, force: true });
+    }
   });
 });

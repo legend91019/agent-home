@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { SqliteDatabase } from "../db/database";
 import type { RedactionFinding } from "../../shared/contracts";
+import { readCopy } from "../handoff/search";
 
 const SECRET_REGEXES: RegExp[] = [
   /(?:api[_-]?key|token|secret|password|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{20,})/gi,
@@ -47,6 +48,19 @@ export class RedactionScanner {
       "SELECT idx, role, text, attachments FROM handoff_messages WHERE handoff_id = ? ORDER BY idx ASC",
       packageId,
     );
+    return this.scanRows(packageId, rows);
+  }
+
+  /** 扫描即将交给目标 Agent 的副本，已删除的消息不再产生警告。 */
+  scanCopy(packageId: string): RedactionFinding[] {
+    return this.scanRows(packageId, readCopy(this.db, packageId).map((event) => ({
+      idx: event.index,
+      text: event.text ?? null,
+      attachments: JSON.stringify(event.attachments ?? []),
+    })));
+  }
+
+  private scanRows(packageId: string, rows: Record<string, unknown>[]): RedactionFinding[] {
     const findings: RedactionFinding[] = [];
 
     for (const row of rows) {

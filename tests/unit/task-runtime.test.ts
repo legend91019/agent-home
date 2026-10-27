@@ -74,7 +74,7 @@ describe("TaskRuntime 状态机与持久化", () => {
     expect(read!.status).toBe("waiting_for_user");
   });
 
-  it("(d) 外部导入（controllable=0）的 Run 不可由工作台中断", () => {
+  it("(d) 外部导入（controllable=0）的 Run 不可由工作台中断", async () => {
     const db = makeDb();
     seedProject(db);
     const rt = new TaskRuntime(db, new AdapterRegistry(db));
@@ -94,7 +94,7 @@ describe("TaskRuntime 状态机与持久化", () => {
     );
 
     expect(rt.getRun(runId)!.controllable).toBe(false);
-    expect(() => rt.interruptRun(runId)).rejects.toMatchObject({
+    await expect(rt.interruptRun(runId)).rejects.toMatchObject({
       code: "permission_denied",
     });
   });
@@ -123,6 +123,7 @@ describe("TaskRuntime 状态机与持久化", () => {
     const read = rt2.getRun(runId);
     expect(read).not.toBeNull();
     expect(read!.status).toBe("succeeded");
-    expect(read!.controllable).toBe(true);
+    // 原生进程句柄不跨进程持久化，重启后不能误报“可中断”。
+    expect(read!.controllable).toBe(false);
   });
 });

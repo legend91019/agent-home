@@ -119,10 +119,13 @@ function setupWorkflow(
 describe("MergeService", () => {
   let db: SqliteDatabase;
   let repoPath: string;
+  let managedRoot: string;
+  const workspaceManager = () => new WorkspaceManager(db, () => managedRoot);
 
   beforeEach(() => {
     db = makeDb();
     repoPath = makeRepo();
+    managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "awb-worktrees-"));
     seedProject(db, "p1", repoPath);
   });
 
@@ -137,10 +140,15 @@ describe("MergeService", () => {
     } catch {
       /* ignore */
     }
+    try {
+      fs.rmSync(managedRoot, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   });
 
   it("(a) 非冲突双分支：创建无冲突，应用后目标 main 工作区含两份改动", () => {
-    const wm = new WorkspaceManager(db);
+    const wm = workspaceManager();
     const ms = new MergeService(db, wm);
 
     const { workflowId } = setupWorkflow(db, wm, repoPath, [
@@ -154,7 +162,7 @@ describe("MergeService", () => {
     expect(proposal.baselineValid).toBe(true);
 
     const res = ms.applyProposal(proposal.id, "apply");
-    expect(res.ok).toBe(true);
+    expect(res.ok, res.message).toBe(true);
 
     // 目标 main 工作区现在包含两份改动。
     expect(fs.readFileSync(path.join(repoPath, "fileA.txt"), "utf8")).toBe("A content\n");
@@ -162,7 +170,7 @@ describe("MergeService", () => {
   });
 
   it("(b) 同文件冲突：创建检测到冲突，apply 返回失败且目标文件保持原样", () => {
-    const wm = new WorkspaceManager(db);
+    const wm = workspaceManager();
     const ms = new MergeService(db, wm);
 
     const { workflowId } = setupWorkflow(db, wm, repoPath, [
@@ -181,7 +189,7 @@ describe("MergeService", () => {
   });
 
   it("(c) 过期基线：main 有新提交后刷新失效，apply 返回失败且目标不变", () => {
-    const wm = new WorkspaceManager(db);
+    const wm = workspaceManager();
     const ms = new MergeService(db, wm);
 
     const { workflowId } = setupWorkflow(db, wm, repoPath, [
@@ -211,7 +219,7 @@ describe("MergeService", () => {
   });
 
   it("(d) 拒绝：apply(reject) 返回成功且分支工作区目录保留", () => {
-    const wm = new WorkspaceManager(db);
+    const wm = workspaceManager();
     const ms = new MergeService(db, wm);
 
     const { workflowId } = setupWorkflow(db, wm, repoPath, [
@@ -229,5 +237,44 @@ describe("MergeService", () => {
     for (const r of wsRows) {
       expect(fs.existsSync(String(r.path))).toBe(true);
     }
+  });
+
+  it("目标工作区有未提交改动时拒绝应用，保留用户内容", () => {
+    const ms = new MergeService(db, workspaceManager());
+    const { workflowId } = setupWorkflow(db, workspaceManager(), repoPath, [
+      { branch: "branch-dirty-target", write: (p) => fs.writeFileSync(path.join(p, "fileA.txt"), "A\n") },
+    ]);
+    const proposal = ms.createMergeProposal(workflowId);
+    fs.writeFileSync(path.join(repoPath, "README.md"), "用户尚未提交的内容\n");
+    const result = ms.applyProposal(proposal.id, "apply");
+    expect(result.ok).toBe(false);
+    expect(fs.readFileSync(path.join(repoPath, "README.md"), "utf8")).toBe("用户尚未提交的内容\n");
+    expect(fs.existsSync(path.join(repoPath, "fileA.txt"))).toBe(false);
+  });
+
+  it("分支包含未提交改动时拒绝应用，避免遗漏工作成果", () => {
+    const wm = workspaceManager();
+    const ms = new MergeService(db, wm);
+    const { workflowId } = setupWorkflow(db, wm, repoPath, [
+      { branch: "branch-dirty-source", write: (p) => fs.writeFileSync(path.join(p, "fileA.txt"), "A\n") },
+    ]);
+    const proposal = ms.createMergeProposal(workflowId);
+    const ws = db.getRow("SELECT path FROM workspaces WHERE project_id = ?", "p1");
+    fs.writeFileSync(path.join(String(ws!.path), "extra.txt"), "尚未提交\n");
+    const result = ms.applyProposal(proposal.id, "apply");
+    expect(result.ok).toBe(false);
+    expect(fs.existsSync(path.join(repoPath, "fileA.txt"))).toBe(false);
+  });
+
+  it("三个分支的累积冲突会出现在提案中", () => {
+    const wm = workspaceManager();
+    const ms = new MergeService(db, wm);
+    const { workflowId } = setupWorkflow(db, wm, repoPath, [
+      { branch: "branch-three-a", write: (p) => fs.writeFileSync(path.join(p, "shared.txt"), "A\n") },
+      { branch: "branch-three-b", write: (p) => fs.writeFileSync(path.join(p, "fileB.txt"), "B\n") },
+      { branch: "branch-three-c", write: (p) => fs.writeFileSync(path.join(p, "shared.txt"), "C\n") },
+    ]);
+    const proposal = ms.createMergeProposal(workflowId);
+    expect(proposal.conflicts).toContain("shared.txt");
   });
 });

@@ -4,10 +4,9 @@
  *
  * 设计要点：
  *  - 所有 git 命令均通过 child_process.spawnSync 以「参数数组」形式调用，绝不拼接 shell 字符串。
- *  - 冲突探测使用 `git merge-tree --write-tree --merge-base=<base> <b1> ... <bN>`，
- *    依据非零退出与输出中的 CONFLICT / 未合并条目行判定。
+ *  - 冲突探测在临时 worktree 中按顺序合并全部分支，读取未合并路径。
  *  - 应用合并时，先在「临时集成 worktree」中完成合并（可丢弃），得到合并后的树，
- *    再以 `git checkout -f <tree> -- .` 把结果落到目标分支工作区，绝不触碰目标分支 ref。
+ *    再以经过检查的补丁落到干净的目标工作区，绝不触碰目标分支 ref。
  *  - 仅使用已有的 merge_proposals / workflows / workflow_nodes / runs / workspaces / tasks / projects 表。
  */
 import { spawnSync } from "node:child_process";
@@ -153,6 +152,7 @@ export class MergeService {
         agentId,
         branch: ws.branch,
         baseCommit: ws.baseCommit,
+        headCommit: this.runGit(["-C", ws.path, "rev-parse", "HEAD"]),
         committedChanges,
         uncommittedChanges,
         untrackedFiles,
@@ -192,26 +192,26 @@ export class MergeService {
     branches: string[],
   ): string[] {
     if (branches.length < 2) return [];
-    const args = [
-      "merge-tree",
-      "--write-tree",
-      `--merge-base=${baseCommit}`,
-      ...branches,
-    ];
-    const res = spawnSync("git", args, { cwd: projectPath, encoding: "utf8" });
-    const out = `${(res.stdout ?? "").toString()}\n${(res.stderr ?? "").toString()}`;
-    const conflicts = new Set<string>();
-    for (const line of out.split("\n")) {
-      const m = line.match(/CONFLICT \([^)]+\):\s*(?:Merge conflict in\s*)?(.+)$/);
-      if (m) {
-        conflicts.add(m[1].trim());
-        continue;
+    const tempPath = fs.mkdtempSync(path.join(os.tmpdir(), "awb-merge-probe-"));
+    try {
+      this.runGit(["worktree", "add", "--detach", tempPath, baseCommit], projectPath);
+      for (const branch of branches) {
+        const merged = spawnSync("git", ["-C", tempPath, "merge", "--no-commit", "--no-ff", branch], { encoding: "utf8" });
+        if (merged.error || merged.status !== 0) {
+          const unresolved = this.tryGit(["-C", tempPath, "diff", "--name-only", "--diff-filter=U"]);
+          const paths = unresolved?.split(/\r?\n/).filter(Boolean) ?? [];
+          return paths.length ? paths : [`合并探测失败：${branch}`];
+        }
+        const output = `${merged.stdout ?? ""}\n${merged.stderr ?? ""}`;
+        if (!/Already up to date/i.test(output)) {
+          this.runGit(["-C", tempPath, "-c", "user.name=Agent Workbench", "-c", "user.email=workbench@local.invalid", "commit", "--no-edit", "--no-verify", "-m", `probe ${branch}`]);
+        }
       }
-      // 未合并条目：100644 <hash> <stage>\t<path>
-      const u = line.match(/^\d+ \S+ \S+ [123]\t(.+)$/);
-      if (u) conflicts.add(u[1].trim());
+      return [];
+    } finally {
+      this.tryGit(["-C", projectPath, "worktree", "remove", tempPath, "--force"], projectPath);
+      fs.rmSync(tempPath, { recursive: true, force: true });
     }
-    return [...conflicts];
   }
 
   /* --------------------------- 刷新提案 --------------------------- */
@@ -236,6 +236,14 @@ export class MergeService {
       proposal.updated_at = now;
     }
 
+    const branches = JSON.parse(proposal.branches) as MergeBranchDTO[];
+    if (branches.some((branch) => !branch.headCommit || this.tryGit(["-C", projectPath, "rev-parse", branch.branch]) !== branch.headCommit)) {
+      const now = new Date().toISOString();
+      this.db.run("UPDATE merge_proposals SET baseline_valid = 0, updated_at = ? WHERE id = ?", now, id);
+      proposal.baseline_valid = 0;
+      proposal.updated_at = now;
+    }
+
     return this.rowToDTO(proposal as unknown as Record<string, unknown>);
   }
 
@@ -244,6 +252,9 @@ export class MergeService {
   applyProposal(id: string, decision: MergeDecision): { ok: boolean; message: string } {
     if (decision === "reject") {
       return { ok: true, message: "已拒绝合并，所有分支保留" };
+    }
+    if (decision === "resolve-then-apply") {
+      return { ok: false, message: "尚未提供冲突解决结果；请在分支处理并提交后重新创建提案" };
     }
 
     // 先刷新，重判基线有效性。
@@ -268,6 +279,21 @@ export class MergeService {
 
     if (branches.length === 0) {
       return { ok: true, message: "没有可合并的分支，已跳过" };
+    }
+
+    // 目标有任何未提交内容时禁止落地。分支必须仍是预览时的提交且工作区干净；
+    // 否则合并会遗漏 Agent 的未提交成果，或在用户不知情时使用新提交。
+    if (this.runGit(["-C", projectPath, "status", "--porcelain", "--untracked-files=all"])) {
+      return { ok: false, message: "目标工作区存在未提交改动，请先处理后重新创建提案" };
+    }
+    for (const branch of branches) {
+      const run = this.db.getRow("SELECT workspace_id FROM runs WHERE id = ?", branch.runId);
+      const workspace = run?.workspace_id ? this.workspaces.getWorkspace(String(run.workspace_id)) : null;
+      if (!workspace || workspace.branch !== branch.branch || !branch.headCommit ||
+        this.tryGit(["-C", workspace.path, "rev-parse", "HEAD"]) !== branch.headCommit ||
+        this.tryGit(["-C", workspace.path, "status", "--porcelain", "--untracked-files=all"]) !== "") {
+        return { ok: false, message: `分支 ${branch.branch} 已变化或存在未提交改动，请重新创建提案` };
+      }
     }
 
     const tempPath = fs.mkdtempSync(path.join(os.tmpdir(), "awb-merge-"));
@@ -297,6 +323,8 @@ export class MergeService {
           this.runGit([
             "-C",
             tempPath,
+            "-c", "user.name=Agent Workbench",
+            "-c", "user.email=workbench@local.invalid",
             "commit",
             "--no-edit",
             "--no-verify",
@@ -318,8 +346,24 @@ export class MergeService {
         );
       }
 
-      // 把合并结果落到目标工作区（不提交、不推送）。
-      this.runGit(["-C", projectPath, "checkout", "-f", tree, "--", "."]);
+      if (this.runGit(["-C", projectPath, "status", "--porcelain", "--untracked-files=all"])) {
+        throw new WorkbenchError("conflict", "目标工作区在合并过程中发生变化，已中止");
+      }
+
+      // 先验证补丁可完整应用，再写入索引与工作树；不使用强制检出。
+      const diff = spawnSync("git", ["-C", projectPath, "diff", "--binary", baseCommit, tree, "--"], { encoding: "utf8" });
+      if (diff.error || diff.status !== 0) {
+        throw new WorkbenchError("process_failed", diff.error?.message ?? String(diff.stderr));
+      }
+      const patch = diff.stdout ?? "";
+      if (patch) {
+        for (const args of [["apply", "--index", "--check"], ["apply", "--index"]]) {
+          const applied = spawnSync("git", ["-C", projectPath, ...args], { input: patch, encoding: "utf8" });
+          if (applied.error || applied.status !== 0) {
+            throw new WorkbenchError("conflict", applied.error?.message ?? String(applied.stderr || applied.stdout));
+          }
+        }
+      }
 
       ok = true;
       message = "已合并到目标分支（未自动提交/推送）";

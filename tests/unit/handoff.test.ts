@@ -87,6 +87,23 @@ describe("handoff archive", () => {
     expect(getSummary(db, ref.handoffId).sourceSnapshotHash).toBe(originalHash);
   });
 
+  it("用户移除全部附件后，副本不再保留附件", async () => {
+    const db = makeDb();
+    seedProject(db);
+    const source = (async function* (): AsyncIterable<VisibleEvent> {
+      yield {
+        index: 0,
+        role: "user",
+        timestamp: new Date().toISOString(),
+        text: "attachment",
+        attachments: [{ name: "a.txt", kind: "file", sizeBytes: 1, available: true }],
+      };
+    })();
+    const ref = await archiveSession(db, source, { ...session, messageCount: 1 }, "p1");
+    createPackage(db, ref.handoffId, [{ eventIndex: 0, text: "attachment", removeAttachments: ["a.txt"] }]);
+    expect(readCopy(db, ref.handoffId)[0].attachments).toEqual([]);
+  });
+
   it("检索能找到首条和末条", async () => {
     const db = makeDb();
     seedProject(db);
@@ -97,5 +114,37 @@ describe("handoff archive", () => {
     expect(first[0].index).toBe(0);
     expect(last).toHaveLength(1);
     expect(last[0].index).toBe(999);
+  });
+
+  it("快照被修改后完整性校验能发现哈希不一致", async () => {
+    const db = makeDb();
+    seedProject(db);
+    const ref = await archiveSession(db, makeSource(2), { ...session, messageCount: 2 }, "p1");
+    db.run("UPDATE handoff_messages SET text = ? WHERE handoff_id = ? AND idx = 0", "changed", ref.handoffId);
+    const report = verifyPackage(db, ref.handoffId);
+    expect(report.complete).toBe(false);
+    expect(report.missing).toContain("源快照哈希不匹配");
+  });
+
+  it("源会话读取中途失败时不留下半成品交接包", async () => {
+    const db = makeDb();
+    seedProject(db);
+    const source = (async function* (): AsyncIterable<VisibleEvent> {
+      yield { index: 0, role: "user", timestamp: new Date().toISOString(), text: "first" };
+      throw new Error("source read failed");
+    })();
+    await expect(archiveSession(db, source, session, "p1")).rejects.toThrow("source read failed");
+    expect(db.getRows("SELECT id FROM handoffs")).toEqual([]);
+    expect(db.getRows("SELECT handoff_id FROM handoff_messages")).toEqual([]);
+  });
+
+  it("源工具不提供总条数时明确标记无法独立核对", async () => {
+    const db = makeDb();
+    seedProject(db);
+    const ref = await archiveSession(db, makeSource(2), { ...session, messageCount: 0 }, "p1");
+    const report = verifyPackage(db, ref.handoffId);
+    expect(report.sourceCount).toBeNull();
+    expect(report.complete).toBe(false);
+    expect(report.missing).toContain("源工具未提供总条数，无法独立核对完整性");
   });
 });

@@ -1,342 +1,413 @@
 /**
- * 配置发布器：把工作台发现的共享产物（rules/skills/knowledge）发布到某个
- * 目标 Agent 的原生配置文件中。所有写入均先备份、再写入，且数据库记录与
- * 文件系统写入在失败时回滚，保证不会留下半写入状态。
+ * 共享配置发布：预览快照按 artifactId 选择；源/目标再次校验后暂存、替换、记账。
+ * 每次发布保存准确目标与原字节证据，回滚不依赖内存，也不猜测旧记录的目标。
  */
-import * as crypto from "node:crypto";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { SqliteDatabase } from "../db/database";
-import { ProjectRegistry } from "../projects/registry";
-import { WorkbenchError } from "../../shared/errors";
-import {
-  type AgentId,
-  type DiffChoice,
-  type PublishDiff,
-  type PublishDiffEntry,
-  type PublishReceipt,
-  type SharedArtifactDTO,
-} from "../../shared/contracts";
-import { ConfigInventory } from "./inventory";
-
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { SqliteDatabase } from '../db/database';
+import { ProjectRegistry } from '../projects/registry';
+import { WorkbenchError } from '../../shared/errors';
+import type { AgentId, DiffChoice, PublishDiff, PublishDiffEntry, PublishReceipt, SharedArtifactDTO } from '../../shared/contracts';
+import { ConfigInventory } from './inventory';
+type Kind = SharedArtifactDTO['kind'];
 interface StoredDiff {
   projectId: string;
+  projectPath: string;
   targetAgentId: AgentId;
-  artifacts: SharedArtifactDTO[];
+  entries: PublishDiffEntry[];
 }
-
-interface PlanItem {
-  artifact: SharedArtifactDTO;
-  entry: PublishDiffEntry;
-  choice: DiffChoice;
-  sharedHash: string | null;
+interface Change {
+  artifactId: string;
+  kind: Kind;
+  target: string;
+  source: string | null;
+  beforeHash: string | null;
+  afterHash: string | null;
+  backup: string | null;
+  stage: string | null;
+  previousPublishedAt: string | null;
 }
-
-function hashBytes(buf: Buffer): string {
-  return crypto.createHash("sha256").update(buf).digest("hex");
+function key(file: string): string {
+  const resolved = path.resolve(file);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
-
-function hashFile(p: string): string | null {
-  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) return null;
-  return hashBytes(fs.readFileSync(p));
+function within(root: string, file: string): boolean {
+  const relative = path.relative(key(root), key(file));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
-
-function walk(dir: string, cb: (file: string, rel: string) => void, base: string = dir): void {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full, cb, base);
-    else if (entry.isFile()) cb(full, path.relative(base, full));
+function stat(file: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(file);
+  }
+  catch (error) {
+    if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
+      return null;
+    throw error;
   }
 }
-
-function hashDir(dir: string): string | null {
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return null;
-  const parts: { rel: string; h: string }[] = [];
-  walk(dir, (file, rel) => parts.push({ rel, h: hashBytes(fs.readFileSync(file)) }));
-  parts.sort((a, b) => a.rel.localeCompare(b.rel));
-  const h = crypto.createHash("sha256");
-  for (const p of parts) h.update(p.rel + "\0" + p.h + "\0");
-  return h.digest("hex");
+/** 拒绝路径逃逸及符号链接/junction，避免复制、备份或删除进入项目之外。 */
+function safePath(root: string, file: string): void {
+  if (key(root) === key(file) || !within(root, file))
+    throw new WorkbenchError('invalid_data', '发布路径必须位于项目内部');
+  let current = path.resolve(root);
+  if (stat(current)?.isSymbolicLink())
+    throw new WorkbenchError('invalid_data', '项目根目录不能是符号链接');
+  for (const segment of path.relative(root, file).split(path.sep)) {
+    current = path.join(current, segment);
+    const info = stat(current);
+    if (info?.isSymbolicLink())
+      throw new WorkbenchError('invalid_data', '发布路径包含符号链接或 junction');
+    if (info && key(current) !== key(file) && !info.isDirectory())
+      throw new WorkbenchError('invalid_data', '发布路径的父级不是目录');
+  }
 }
-
+function hashPath(file: string, kind: Kind): string | null {
+  const info = stat(file);
+  if (!info)
+    return null;
+  if (info.isSymbolicLink())
+    throw new WorkbenchError('invalid_data', '发布内容包含符号链接');
+  const hash = crypto.createHash('sha256');
+  if (kind !== 'skill') {
+    if (!info.isFile())
+      throw new WorkbenchError('invalid_data', '规则或知识目标必须为文件');
+    return hash.update(fs.readFileSync(file)).digest('hex');
+  }
+  if (!info.isDirectory())
+    throw new WorkbenchError('invalid_data', 'skill 目标必须为目录');
+  const visit = (directory: string) => {
+    for (const item of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(directory, item.name);
+      const relative = path.relative(file, full).split(path.sep).join('/');
+      if (item.isSymbolicLink())
+        throw new WorkbenchError('invalid_data', 'skill 内不能包含符号链接');
+      if (item.isDirectory()) {
+        hash.update(`directory\0${relative}\0`);
+        visit(full);
+      }
+      else if (item.isFile()) {
+        hash.update(`file\0${relative}\0`);
+        hash.update(crypto.createHash('sha256').update(fs.readFileSync(full)).digest());
+      }
+      else
+        throw new WorkbenchError('invalid_data', 'skill 内包含不支持的文件类型');
+    }
+  };
+  visit(file);
+  return hash.digest('hex');
+}
+function copyPath(source: string, target: string): void {
+  const info = fs.lstatSync(source);
+  if (info.isSymbolicLink())
+    throw new WorkbenchError('invalid_data', '不能复制符号链接');
+  if (info.isDirectory()) {
+    fs.mkdirSync(target, { recursive: true });
+    for (const item of fs.readdirSync(source))
+      copyPath(path.join(source, item), path.join(target, item));
+  }
+  else if (info.isFile()) {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+  }
+  else
+    throw new WorkbenchError('invalid_data', '不支持的发布文件类型');
+}
+function removePath(root: string, file: string): void {
+  safePath(root, file);
+  fs.rmSync(file, { recursive: true, force: true });
+}
+/** 目录先移动原目录，再把已完整暂存的副本移入，失败立即把原目录移回。 */
+function replacePath(root: string, stage: string, target: string): void {
+  safePath(root, stage);
+  safePath(root, target);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  if (!stat(target)) {
+    fs.renameSync(stage, target);
+    return;
+  }
+  if (fs.lstatSync(stage).isFile() && fs.lstatSync(target).isFile()) {
+    fs.renameSync(stage, target);
+    return;
+  }
+  const displaced = `${target}.awb-old-${crypto.randomUUID()}`;
+  safePath(root, displaced);
+  fs.renameSync(target, displaced);
+  try {
+    fs.renameSync(stage, target);
+  }
+  catch (error) {
+    fs.renameSync(displaced, target);
+    throw error;
+  }
+  // 目标已完整替换；旧副本清理失败时保留它，恢复证据仍在独立 backup 中。
+  try {
+    removePath(root, displaced);
+  }
+  catch { /* 可人工清理，不破坏已发布目标。 */ }
+}
 export class ConfigPublisher {
   private readonly registry: ProjectRegistry;
   private readonly diffs = new Map<string, StoredDiff>();
-
-  constructor(private readonly db: SqliteDatabase) {
-    this.registry = new ProjectRegistry(db);
-  }
-
-  /** 预览：对每个已知产物计算共享哈希、原生哈希与上次发布哈希，并给出状态。 */
-  previewPublish(projectId: string, targetAgentId: AgentId): PublishDiff {
-    const projectPath = this.resolveProjectPath(projectId);
-    const artifacts = new ConfigInventory(this.db).scanArtifacts(projectId);
-    const entries = this.buildEntries(artifacts, projectPath, targetAgentId).map((b) => b.entry);
-    const diff: PublishDiff = {
-      id: crypto.randomUUID(),
-      projectId,
-      targetAgentId,
-      entries,
-      createdAt: new Date().toISOString(),
-    };
-    this.diffs.set(diff.id, { projectId, targetAgentId, artifacts });
-    return diff;
-  }
-
-  /**
-   * 应用发布：按 choices 对每个条目执行对应策略。所有写操作在出错时回滚
-   * （文件系统已写部分从备份恢复，数据库通过事务回滚）。
-   */
-  publish(diffId: string, choices: Record<string, DiffChoice>): PublishReceipt {
-    const stored = this.diffs.get(diffId);
-    if (!stored) throw new WorkbenchError("invalid_data", `未知 diff: ${diffId}`);
-    const { projectId, targetAgentId, artifacts } = stored;
-    const projectPath = this.resolveProjectPath(projectId);
-    const backupDir = path.join(projectPath, ".agent-workbench", "backups");
-    fs.mkdirSync(backupDir, { recursive: true });
-    const timestamp = Date.now().toString();
-    const now = new Date().toISOString();
-
-    // 仅处理用户明确选择的条目；未给出的视为 keep-native（不改动）。
-    const plan: PlanItem[] = this.buildEntries(artifacts, projectPath, targetAgentId)
-      .filter((b) => {
-        const c = choices[b.entry.path];
-        return c === "overwrite-with-shared" || c === "manual-merge";
-      })
-      .map((b) => ({ ...b, choice: choices[b.entry.path] as DiffChoice }));
-
-    // 阶段 1：备份现有原生文件（仅读取 + 写入备份目录，安全）。
-    const backups = new Map<string, string | null>();
-    for (const item of plan) {
-      backups.set(item.entry.path, this.backupNative(item.entry.path, backupDir, timestamp));
-    }
-
-    const written: string[] = [];
-    try {
-      // 阶段 2：写入原生文件（可能抛错，例如目标目录不可写）。
-      for (const item of plan) {
-        this.writeSharedToNative(item.artifact, item.entry.path, projectPath);
-        written.push(item.entry.path);
-      }
-      // 阶段 3：记录上次发布哈希的侧车文件（供后续 preview 判定 conflict）。
-      for (const item of plan) {
-        const hp = path.join(backupDir, `pubhash-${item.artifact.id}.txt`);
-        fs.writeFileSync(hp, item.sharedHash ?? "");
-      }
-      // 阶段 4：数据库事务写入 publications 与 published_at。
-      this.db.transaction((tx) => {
-        for (const item of plan) {
-          const pubId = crypto.randomUUID();
-          tx.run(
-            `INSERT INTO publications (id, artifact_id, diff_id, applied_at, backup_path)
-             VALUES (?, ?, ?, ?, ?)`,
-            pubId,
-            item.artifact.id,
-            diffId,
-            now,
-            backups.get(item.entry.path) ?? null,
-          );
-          tx.run("UPDATE shared_artifacts SET published_at = ? WHERE id = ?", now, item.artifact.id);
-        }
-      });
-    } catch (err) {
-      // 文件系统或数据库失败：把已写入的原生文件从备份恢复（新文件则删除），
-      // 数据库事务已在抛错时自动回滚。
-      for (const nativePath of written) {
-        const bk = backups.get(nativePath);
-        if (bk && fs.existsSync(bk)) {
-          this.copyPath(bk, nativePath);
-        } else {
-          try {
-            fs.rmSync(nativePath, { recursive: true, force: true });
-          } catch {
-            /* 忽略清理失败 */
-          }
-        }
-      }
-      throw err;
-    }
-
-    const firstBackup = plan.length ? backups.get(plan[0].entry.path) ?? backupDir : backupDir;
-    return {
-      id: diffId,
-      diffId,
-      appliedChoices: choices,
-      backupPath: firstBackup,
-      appliedAt: now,
-    };
-  }
-
-  /** 回滚一次发布：把每个产物的原生文件从备份恢复，并删除 publications 记录。 */
-  rollback(receiptId: string): void {
-    const stored = this.diffs.get(receiptId);
-    const pubs = this.db.getRows("SELECT * FROM publications WHERE diff_id = ?", receiptId);
-    if (pubs.length === 0) return;
-
-    for (const pub of pubs) {
-      const artifactRow = this.db.getRow(
-        "SELECT project_id, kind, name FROM shared_artifacts WHERE id = ?",
-        pub.artifact_id,
-      );
-      if (!artifactRow) continue;
-      const projectPath = this.resolveProjectPath(String(artifactRow.project_id));
-      const agentId: AgentId = stored ? stored.targetAgentId : "workbuddy";
-      const artifact: SharedArtifactDTO = {
-        id: String(pub.artifact_id),
-        projectId: String(artifactRow.project_id),
-        kind: artifactRow.kind as SharedArtifactDTO["kind"],
-        name: String(artifactRow.name),
-        scope: "project",
-        targetAgents: [],
-        version: 1,
-        createdAt: "",
-        publishedAt: null,
-        sourcePath: undefined,
-      };
-      const nativePath = this.nativeTargetFor(artifact, projectPath, agentId);
-      const backupPath = pub.backup_path ? String(pub.backup_path) : null;
-
-      if (backupPath && fs.existsSync(backupPath)) {
-        this.copyPath(backupPath, nativePath);
-      } else {
-        // 该产物是首次发布（之前没有原生文件），回滚即删除已发布的文件。
-        try {
-          fs.rmSync(nativePath, { recursive: true, force: true });
-        } catch {
-          /* 忽略 */
-        }
-      }
-
-      // 清理侧车哈希并复位 published_at
-      try {
-        fs.rmSync(path.join(projectPath, ".agent-workbench", "backups", `pubhash-${pub.artifact_id}.txt`), {
-          force: true,
-        });
-      } catch {
-        /* 忽略 */
-      }
-      this.db.run("UPDATE shared_artifacts SET published_at = NULL WHERE id = ?", pub.artifact_id);
-      this.db.run("DELETE FROM publications WHERE id = ?", pub.id);
-    }
-  }
-
-  private resolveProjectPath(projectId: string): string {
+  constructor(private readonly db: SqliteDatabase) { this.registry = new ProjectRegistry(db); }
+  private projectPath(projectId: string): string {
     const project = this.registry.getProject(projectId);
-    if (!project) throw new WorkbenchError("invalid_data", `未知项目: ${projectId}`);
+    if (!project)
+      throw new WorkbenchError('invalid_data', `未知项目: ${projectId}`);
     return project.path;
   }
-
-  private nativeTargetFor(
-    artifact: SharedArtifactDTO,
-    projectPath: string,
-    agentId: AgentId,
-  ): string {
-    if (artifact.kind === "skill") {
-      return path.join(projectPath, ".agent-workbench", "skills", artifact.name);
-    }
-    if (agentId === "claude-code") return path.join(projectPath, "CLAUDE.md");
-    if (agentId === "codex") return path.join(projectPath, "AGENTS.md");
-    return path.join(projectPath, `.${agentId}.md`);
-  }
-
-  private sharedPathFor(artifact: SharedArtifactDTO, projectPath: string): string {
-    const sp = artifact.sourcePath;
-    if (sp && fs.existsSync(sp)) return sp;
-    return path.join(projectPath, ".agent-workbench", artifact.kind, artifact.name);
-  }
-
-  private lastPublishedHash(artifactId: string, projectPath: string): string | null {
-    const hp = path.join(projectPath, ".agent-workbench", "backups", `pubhash-${artifactId}.txt`);
-    if (fs.existsSync(hp)) {
-      try {
-        const content = fs.readFileSync(hp, "utf8").trim();
-        return content || null;
-      } catch {
+  private nativeTarget(artifact: SharedArtifactDTO, root: string, agent: AgentId): string | null {
+    if (artifact.kind === 'skill') {
+      if (!artifact.name || path.basename(artifact.name) !== artifact.name || ['.', '..'].includes(artifact.name))
         return null;
-      }
+      if (agent === 'claude-code')
+        return path.join(root, '.claude', 'skills', artifact.name);
+      if (agent === 'codex')
+        return path.join(root, '.agents', 'skills', artifact.name);
+      return null;
     }
+    if (artifact.kind === 'workflow')
+      return null;
+    if (agent === 'claude-code')
+      return path.join(root, 'CLAUDE.md');
+    if (agent === 'codex')
+      return path.join(root, 'AGENTS.md');
     return null;
   }
-
-  private buildEntries(
-    artifacts: SharedArtifactDTO[],
-    projectPath: string,
-    targetAgentId: AgentId,
-  ): { artifact: SharedArtifactDTO; entry: PublishDiffEntry; sharedHash: string | null }[] {
-    return artifacts.map((artifact) => {
-      const nativePath = this.nativeTargetFor(artifact, projectPath, targetAgentId);
-      const sharedPath = this.sharedPathFor(artifact, projectPath);
-      const isDir = artifact.kind === "skill";
-      const sharedHash = isDir ? hashDir(sharedPath) : hashFile(sharedPath);
-      const nativeHash = isDir ? hashDir(nativePath) : hashFile(nativePath);
-      const lastPublishedHash = this.lastPublishedHash(artifact.id, projectPath);
-
-      let status: PublishDiffEntry["status"];
-      if (nativeHash === null && sharedHash !== null) status = "new";
-      else if (sharedHash !== null && nativeHash !== null && sharedHash === nativeHash)
-        status = "identical";
-      else if (
-        nativeHash !== null &&
-        sharedHash !== null &&
-        nativeHash !== sharedHash &&
-        lastPublishedHash !== null
-      )
-        status = "conflict";
-      else status = "changed";
-
-      return {
-        artifact,
-        sharedHash,
-        entry: { path: nativePath, status, sharedHash, nativeHash, lastPublishedHash },
-      };
+  private baseline(agent: AgentId, target: string): string | null {
+    const row = this.db.getRow('SELECT shared_hash FROM publications WHERE target_agent_id = ? AND target_path = ? ORDER BY rowid DESC LIMIT 1', agent, target);
+    return typeof row?.shared_hash === 'string' ? row.shared_hash : null;
+  }
+  /** inventory 可能同时发现共享 skill 和其已发布副本；优先保留非原生共享来源。 */
+  private sources(projectId: string, root: string): {
+    artifact: SharedArtifactDTO;
+    ambiguous: boolean;
+  }[] {
+    const groups = new Map<string, SharedArtifactDTO[]>();
+    for (const artifact of new ConfigInventory(this.db).scanArtifacts(projectId)) {
+      const source = artifact.sourcePath;
+      if (!source || within(path.join(root, '.agent-workbench', 'backups'), source) || source.includes('.awb-old-'))
+        continue;
+      const group = groups.get(artifact.id) ?? [];
+      if (!group.some(a => key(a.sourcePath!) === key(source)))
+        group.push(artifact);
+      groups.set(artifact.id, group);
+    }
+    return [...groups.values()].map(group => {
+      const shared = group.filter(a => !within(path.join(root, '.claude', 'skills'), a.sourcePath!) && !within(path.join(root, '.agents', 'skills'), a.sourcePath!));
+      const candidates = shared.length ? shared : group;
+      return { artifact: candidates[0], ambiguous: candidates.length > 1 };
     });
   }
-
-  private backupNative(nativePath: string, backupDir: string, timestamp: string): string | null {
-    if (fs.existsSync(nativePath)) {
-      const rel = path.basename(nativePath).replace(/[^a-zA-Z0-9._-]/g, "_");
-      const dest = path.join(backupDir, `${timestamp}-${rel}`);
-      this.copyPath(nativePath, dest);
-      return dest;
+  previewPublish(projectId: string, targetAgentId: AgentId): PublishDiff {
+    const root = this.projectPath(projectId);
+    const entries: PublishDiffEntry[] = this.sources(projectId, root).map(({ artifact, ambiguous }) => {
+      const target = this.nativeTarget(artifact, root, targetAgentId);
+      const entry: PublishDiffEntry = { artifactId: artifact.id, sourcePath: artifact.sourcePath!, kind: artifact.kind, path: target ?? '', status: 'changed', sharedHash: null, nativeHash: null, lastPublishedHash: null, publishable: true };
+      try {
+        if (!target)
+          throw new WorkbenchError('invalid_data', '该 Agent 的此类配置原生路径尚未验证，不支持直接发布');
+        if (ambiguous)
+          throw new WorkbenchError('invalid_data', '多个同名来源无法稳定区分，请保留一个共享来源后重新预览');
+        safePath(root, entry.sourcePath);
+        safePath(root, target);
+        if (key(entry.sourcePath) !== key(target) && (within(entry.sourcePath, target) || within(target, entry.sourcePath)))
+          throw new WorkbenchError('invalid_data', 'skill 源目录与目标目录重叠');
+        entry.sharedHash = hashPath(entry.sourcePath, entry.kind);
+        entry.nativeHash = hashPath(target, entry.kind);
+        entry.lastPublishedHash = this.baseline(targetAgentId, target);
+        if (entry.sharedHash === null)
+          throw new WorkbenchError('incomplete_source', '共享来源不存在，请重新扫描');
+        if (entry.sharedHash === entry.nativeHash)
+          entry.status = 'identical';
+        else if (entry.nativeHash === null)
+          entry.status = 'new';
+        else if (entry.lastPublishedHash !== null && entry.nativeHash !== entry.lastPublishedHash)
+          entry.status = 'conflict';
+        else
+          entry.status = 'changed';
+      }
+      catch (error) {
+        entry.publishable = false;
+        entry.reason = error instanceof Error ? error.message : String(error);
+      }
+      return entry;
+    });
+    for (const entry of entries) {
+      if (!entry.path || !entry.publishable)
+        continue;
+      if (entries.some(other => other.artifactId !== entry.artifactId && key(other.path || root) === key(entry.path))) {
+        entry.reason = '多个来源映射同一目标；一次只能选择一个来源，其余保留原生';
+        if (entry.status !== 'identical')
+          entry.status = 'conflict';
+      }
     }
-    return null;
+    const diff: PublishDiff = { id: crypto.randomUUID(), projectId, targetAgentId, entries, createdAt: new Date().toISOString() };
+    this.diffs.set(diff.id, { projectId, projectPath: root, targetAgentId, entries: structuredClone(entries) });
+    return diff;
   }
-
-  private writeSharedToNative(
-    artifact: SharedArtifactDTO,
-    nativePath: string,
-    projectPath: string,
-  ): void {
-    const sharedPath = this.sharedPathFor(artifact, projectPath);
-    if (artifact.kind === "skill") {
-      fs.rmSync(nativePath, { recursive: true, force: true });
-      this.copyDir(sharedPath, nativePath);
-    } else {
-      const content = fs.readFileSync(sharedPath);
-      fs.mkdirSync(path.dirname(nativePath), { recursive: true });
-      const tmp = `${nativePath}.tmp-${process.pid}-${Date.now()}`;
-      fs.writeFileSync(tmp, content);
-      fs.renameSync(tmp, nativePath); // 原子替换，避免半写入
+  private validate(stored: StoredDiff, entry: PublishDiffEntry): void {
+    safePath(stored.projectPath, entry.sourcePath);
+    safePath(stored.projectPath, entry.path);
+    if (hashPath(entry.sourcePath, entry.kind) !== entry.sharedHash || hashPath(entry.path, entry.kind) !== entry.nativeHash || this.baseline(stored.targetAgentId, entry.path) !== entry.lastPublishedHash) {
+      throw new WorkbenchError('conflict', '来源或目标在预览后已变化，请重新预览');
     }
   }
-
-  private copyPath(src: string, dest: string): void {
-    const st = fs.statSync(src);
-    if (st.isDirectory()) this.copyDir(src, dest);
-    else {
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.copyFileSync(src, dest);
+  private backupRoot(root: string, id: string): string {
+    const target = path.join(root, '.agent-workbench', 'backups', id);
+    safePath(root, target);
+    fs.mkdirSync(target, { recursive: true });
+    return target;
+  }
+  private prepare(root: string, backupRoot: string, change: Change, index: number): void {
+    const folder = path.join(backupRoot, String(index));
+    safePath(root, folder);
+    fs.mkdirSync(folder, { recursive: true });
+    if (change.beforeHash !== null) {
+      change.backup = path.join(folder, 'before');
+      copyPath(change.target, change.backup);
+      if (hashPath(change.backup, change.kind) !== change.beforeHash)
+        throw new WorkbenchError('conflict', '目标在备份时已变化，请重新预览');
+    }
+    if (change.source !== null) {
+      change.stage = path.join(folder, 'stage');
+      copyPath(change.source, change.stage);
+      if (hashPath(change.stage, change.kind) !== change.afterHash)
+        throw new WorkbenchError('conflict', '来源在暂存时已变化，请重新预览');
     }
   }
-
-  private copyDir(src: string, dest: string): void {
-    fs.rmSync(dest, { recursive: true, force: true });
-    fs.mkdirSync(dest, { recursive: true });
-    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-      const s = path.join(src, entry.name);
-      const d = path.join(dest, entry.name);
-      if (entry.isDirectory()) this.copyDir(s, d);
-      else fs.copyFileSync(s, d);
+  private apply(root: string, change: Change): void {
+    safePath(root, change.target);
+    if (hashPath(change.target, change.kind) !== change.beforeHash)
+      throw new WorkbenchError('conflict', '目标在应用前已变化，请重新预览');
+    if (change.stage)
+      replacePath(root, change.stage, change.target);
+    else
+      removePath(root, change.target);
+  }
+  private restore(root: string, change: Change): void {
+    if (change.backup) {
+      const recovery = `${change.backup}.restore-${crypto.randomUUID()}`;
+      safePath(root, recovery);
+      copyPath(change.backup, recovery);
+      replacePath(root, recovery, change.target);
     }
+    else
+      removePath(root, change.target);
+  }
+  /** 任一文件或数据库失败，逆序恢复所有已替换目标；恢复失败时保留证据并明确报错。 */
+  private execute(root: string, changes: Change[], commit: () => void): void {
+    const written: Change[] = [];
+    try {
+      for (const change of changes) {
+        this.apply(root, change);
+        written.push(change);
+      }
+      commit();
+    }
+    catch (error) {
+      const failures: unknown[] = [];
+      for (const change of written.reverse())
+        try {
+          this.restore(root, change);
+        }
+        catch (restoreError) {
+          failures.push(restoreError);
+        }
+      if (failures.length)
+        throw new WorkbenchError('process_failed', '发布失败且部分自动恢复失败；请保留 backups 中的恢复证据', { original: error instanceof Error ? error.message : String(error), failures: failures.map(e => e instanceof Error ? e.message : String(e)) });
+      throw error;
+    }
+  }
+  publish(diffId: string, choices: Record<string, DiffChoice>): PublishReceipt {
+    const stored = this.diffs.get(diffId);
+    if (!stored)
+      throw new WorkbenchError('invalid_data', `未知或已应用 diff: ${diffId}`);
+    if (key(this.projectPath(stored.projectId)) !== key(stored.projectPath))
+      throw new WorkbenchError('conflict', '项目路径已变化，请重新预览');
+    for (const [id, choice] of Object.entries(choices)) {
+      if (!stored.entries.some(e => e.artifactId === id))
+        throw new WorkbenchError('invalid_data', '发布选择必须使用预览中的 artifactId');
+      if (!['keep-native', 'overwrite-with-shared', 'manual-merge'].includes(choice))
+        throw new WorkbenchError('invalid_data', '非法发布选择');
+      if (choice === 'manual-merge')
+        throw new WorkbenchError('invalid_data', '尚未提供人工合并结果；请在外部完成合并后重新预览，不会自动覆盖');
+    }
+    const selected = stored.entries.filter(e => choices[e.artifactId] === 'overwrite-with-shared');
+    const targets = new Set<string>();
+    for (const entry of selected) {
+      if (entry.publishable === false)
+        throw new WorkbenchError('invalid_data', entry.reason ?? '来源不可发布');
+      if (targets.has(key(entry.path)))
+        throw new WorkbenchError('conflict', '多个选中来源映射同一目标；请只选择一个来源');
+      targets.add(key(entry.path));
+      this.validate(stored, entry);
+    }
+    // 源==目标以及字节相同的发布是 no-op，不备份、不删除、不增加发布记录。
+    const plan = selected.filter(e => e.sharedHash !== e.nativeHash);
+    const now = new Date().toISOString();
+    const appliedChoices: Record<string, DiffChoice> = {};
+    if (!plan.length) {
+      this.diffs.delete(diffId);
+      return { id: diffId, diffId, appliedChoices, appliedAt: now };
+    }
+    const root = stored.projectPath;
+    const backupRoot = this.backupRoot(root, diffId);
+    const changes: Change[] = plan.map(entry => ({ artifactId: entry.artifactId, kind: entry.kind, target: entry.path, source: entry.sourcePath, beforeHash: entry.nativeHash, afterHash: entry.sharedHash, backup: null, stage: null, previousPublishedAt: (this.db.getRow('SELECT published_at FROM shared_artifacts WHERE id = ?', entry.artifactId)?.published_at as string | null) ?? null }));
+    changes.forEach((change, index) => this.prepare(root, backupRoot, change, index));
+    // 暂存/备份之后再次校验整个选中计划，避免前一个目标先写后才发现后续来源漂移。
+    selected.forEach(entry => this.validate(stored, entry));
+    fs.writeFileSync(path.join(backupRoot, 'recovery.json'), JSON.stringify({ diffId, projectId: stored.projectId, targetAgentId: stored.targetAgentId, changes }, null, 2));
+    this.execute(root, changes, () => this.db.transaction(tx => {
+      for (const change of changes) {
+        tx.run(`INSERT INTO publications (id,artifact_id,diff_id,applied_at,backup_path,target_agent_id,target_path,artifact_kind,shared_hash,native_before_hash,published_at_before) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, crypto.randomUUID(), change.artifactId, diffId, now, change.backup, stored.targetAgentId, change.target, change.kind, change.afterHash, change.beforeHash, change.previousPublishedAt);
+        tx.run('UPDATE shared_artifacts SET published_at = ? WHERE id = ?', now, change.artifactId);
+        appliedChoices[change.artifactId] = 'overwrite-with-shared';
+      }
+    }));
+    this.diffs.delete(diffId);
+    return { id: diffId, diffId, appliedChoices, backupPath: backupRoot, appliedAt: now };
+  }
+  rollback(receiptId: string): void {
+    const pubs = this.db.getRows('SELECT p.*, a.project_id FROM publications p JOIN shared_artifacts a ON a.id = p.artifact_id WHERE p.diff_id = ? ORDER BY p.rowid DESC', receiptId);
+    if (!pubs.length)
+      return;
+    let root: string | undefined;
+    const changes: Change[] = pubs.map(pub => {
+      if (typeof pub.target_path !== 'string' || typeof pub.target_agent_id !== 'string' || typeof pub.artifact_kind !== 'string' || typeof pub.shared_hash !== 'string')
+        throw new WorkbenchError('unsupported_version', '旧发布记录缺少准确目标和哈希证据，不能安全自动回滚');
+      const projectRoot = this.projectPath(String(pub.project_id));
+      if (root && key(root) !== key(projectRoot))
+        throw new WorkbenchError('invalid_data', '同一次发布跨越多个项目');
+      root = projectRoot;
+      safePath(root, pub.target_path);
+      const kind = pub.artifact_kind as Kind;
+      if (!['rule', 'skill', 'knowledge', 'workflow'].includes(kind))
+        throw new WorkbenchError('invalid_data', '发布记录的产物类型不合法');
+      if (hashPath(pub.target_path, kind) !== pub.shared_hash)
+        throw new WorkbenchError('conflict', '目标在发布后已变化，回滚会覆盖新内容，已拒绝');
+      const before = typeof pub.native_before_hash === 'string' ? pub.native_before_hash : null;
+      const source = typeof pub.backup_path === 'string' ? pub.backup_path : null;
+      if (before !== null) {
+        if (!source || !within(path.join(root, '.agent-workbench', 'backups'), source))
+          throw new WorkbenchError('incomplete_source', '原始备份路径不可用');
+        safePath(root, source);
+        if (hashPath(source, kind) !== before)
+          throw new WorkbenchError('incomplete_source', '原始备份缺失或已变化，拒绝回滚');
+      }
+      else if (source !== null)
+        throw new WorkbenchError('invalid_data', '回滚备份元数据不一致');
+      return { artifactId: String(pub.artifact_id), kind, target: pub.target_path, source, beforeHash: pub.shared_hash, afterHash: before, backup: null, stage: null, previousPublishedAt: typeof pub.published_at_before === 'string' ? pub.published_at_before : null };
+    });
+    const backupRoot = this.backupRoot(root!, `rollback-${crypto.randomUUID()}`);
+    changes.forEach((change, index) => this.prepare(root!, backupRoot, change, index));
+    this.execute(root!, changes, () => this.db.transaction(tx => {
+      for (let index = 0; index < pubs.length; index++) {
+        const pub = pubs[index];
+        tx.run('DELETE FROM publications WHERE id = ?', pub.id);
+        const latest = tx.getRow('SELECT applied_at FROM publications WHERE artifact_id = ? ORDER BY rowid DESC LIMIT 1', pub.artifact_id);
+        tx.run('UPDATE shared_artifacts SET published_at = ? WHERE id = ?', latest?.applied_at ?? changes[index].previousPublishedAt, pub.artifact_id);
+      }
+    }));
   }
 }

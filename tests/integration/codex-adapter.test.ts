@@ -171,24 +171,14 @@ describe("parseCodexThread", () => {
 });
 
 describe("CodexAdapter", () => {
-  it("probe 在本环境返回 installed:false（codex 未安装）", async () => {
-    const adapter = new CodexAdapter();
+  it("probe 在 CLI 缺失时返回 installed:false", async () => {
+    const adapter = new CodexAdapter({ version: () => null });
     const report = await adapter.probe("/tmp/proj");
     expect(report.installed).toBe(false);
   });
 
-  it("(d) startTask 抛出结构化 WorkbenchError，绝不假装成功", async () => {
-    const adapter = new CodexAdapter();
-    let err: unknown;
-    try {
-      await adapter.startTask(startInput);
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(WorkbenchError);
-    const code = (err as WorkbenchError).code;
-    expect(["not_installed", "unsupported", "unsupported_version", "not_authenticated"]).toContain(
-      code,
-    );
+  it("startTask 保留结构化连接失败，不会假装成功", async () => {
+    const adapter = new CodexAdapter({ connect: async () => { throw new WorkbenchError("not_installed", "missing CLI"); } });
+    await expect(adapter.startTask(startInput)).rejects.toMatchObject({code:"not_installed"});
   });
 });

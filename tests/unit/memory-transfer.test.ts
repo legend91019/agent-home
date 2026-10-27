@@ -78,4 +78,39 @@ describe("MemoryInventory + MemoryTransfer", () => {
     // 确认 preview 本身不会创建文件
     expect(fs.existsSync(path.dirname(targetFile))).toBe(false);
   });
+
+  it("项目原生规则条目可直接预览并转移为目标任务指导文件", () => {
+    fs.writeFileSync(path.join(dir, "CLAUDE.md"), "只在本项目修改登录模块", "utf8");
+    const native = inventory.listVisibleMemories("p1", "claude-code").find((entry) => entry.id.startsWith("native:"));
+    expect(native).toBeDefined();
+    const diff = transfer.previewMemoryTransfer([native!.id], "codex", "project_guidance");
+    expect(diff.previewText).toContain("只在本项目修改登录模块");
+    transfer.applyMemoryTransfer(diff.id);
+    expect(fs.readFileSync(path.join(dir, ".agent-workbench", "memory", "codex.md"), "utf8")).toContain("只在本项目修改登录模块");
+  });
+
+  it("未知来源条目不能生成空白转移", () => {
+    expect(() => transfer.previewMemoryTransfer(["unknown"], "codex", "project_guidance")).toThrow("记忆条目不可用");
+  });
+
+  it("预览后原生记忆变动时拒绝发布旧快照", () => {
+    const source = path.join(dir, "CLAUDE.md");
+    fs.writeFileSync(source, "old", "utf8");
+    const native = inventory.listVisibleMemories("p1", "claude-code")[0];
+    const diff = transfer.previewMemoryTransfer([native.id], "codex", "project_guidance");
+    fs.writeFileSync(source, "new", "utf8");
+    expect(() => transfer.applyMemoryTransfer(diff.id)).toThrow("来源记忆已变化");
+    expect(fs.existsSync(path.join(dir, ".agent-workbench", "memory", "codex.md"))).toBe(false);
+  });
+
+  it("已发布来源发生新变化时清单显示最新内容且撤销已发布标识", () => {
+    const source = path.join(dir, "CLAUDE.md");
+    fs.writeFileSync(source, "old", "utf8");
+    const native = inventory.listVisibleMemories("p1", "claude-code")[0];
+    transfer.applyMemoryTransfer(transfer.previewMemoryTransfer([native.id], "codex", "project_guidance").id);
+    fs.writeFileSync(source, "new", "utf8");
+    const latest = inventory.listVisibleMemories("p1", "claude-code")[0];
+    expect(latest.originalText).toBe("new");
+    expect(latest.published).toBe(false);
+  });
 });
