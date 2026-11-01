@@ -18,7 +18,7 @@ function nativeMemoryPaths(projectPath: string, agentId: AgentId): string[] {
     return [path.join(projectPath, "AGENTS.md")];
   }
   if (agentId === "deepseek-harness") {
-    return [path.join(projectPath, "AGENTS.md")];
+    return [path.join(projectPath, "AGENTS.md"), path.join(projectPath, "CLAUDE.md")];
   }
   if (agentId === "workbuddy") {
     return [path.join(projectPath, "CODEBUDDY.md")];

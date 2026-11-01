@@ -24,6 +24,18 @@ describe('DeepSeek ACP protocol', () => {
     await expect(protocol.request('session/list', {})).rejects.toThrow(/退出/);
   });
 
+  it('waits for a reviewed permission decision and returns only the selected option', async () => {
+    const frames: string[] = [];
+    const protocol = new DeepSeekAcpProtocol(line => frames.push(line));
+    let decide!: (value: unknown) => void;
+    protocol.onRequest(() => new Promise(resolve => { decide = resolve; }));
+    protocol.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'session/request_permission', params: { sessionId: 's' } }));
+    expect(frames).toHaveLength(0);
+    decide({ outcome: { outcome: 'selected', optionId: 'allow-once' } });
+    await Promise.resolve();
+    expect(JSON.parse(frames[0])).toEqual({ jsonrpc: '2.0', id: 9, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } });
+  });
+
   it('times out missing responses', async () => {
     vi.useFakeTimers();
     try {

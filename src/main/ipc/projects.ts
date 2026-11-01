@@ -2,6 +2,7 @@ import { AppContext } from "../services";
 import { ProjectDTO, CapabilityReport, SessionRef, AgentId } from "../../shared/contracts";
 import { WorkbenchError } from "../../shared/errors";
 import { WorkBuddyAdapter } from "../adapters/workbuddy";
+import { DeepSeekAdapter } from "../adapters/deepseek";
 
 export async function listProjects(ctx: AppContext): Promise<ProjectDTO[]> {
   return ctx.projects.listProjects();
@@ -51,5 +52,28 @@ export async function importWorkBuddySession(
   const adapter = ctx.adapters.get("workbuddy");
   if (!(adapter instanceof WorkBuddyAdapter))
     throw new WorkbenchError("unsupported_version", "WorkBuddy 适配器不可用");
+  return adapter.importSession(project.path, input.filePath);
+}
+
+export async function pickDeepSeekExport(): Promise<string | null> {
+  const { dialog } = await import('electron');
+  const result = await dialog.showOpenDialog({
+    title: '选择 DeepSeek Harness 官方会话导出',
+    properties: ['openFile'],
+    filters: [{ name: 'dsh 会话导出', extensions: ['zip', 'md'] }],
+  });
+  return result.canceled ? null : (result.filePaths[0] ?? null);
+}
+
+export async function importDeepSeekSession(
+  ctx: AppContext,
+  input: { projectId: string; filePath: string },
+): Promise<SessionRef> {
+  const project = ctx.projects.getProject(input.projectId);
+  if (!project) throw new WorkbenchError('invalid_data', '项目不存在');
+  if (typeof input.filePath !== 'string' || !input.filePath.trim())
+    throw new WorkbenchError('invalid_data', '请选择 dsh 官方会话导出文件');
+  const adapter = ctx.adapters.get('deepseek-harness');
+  if (!(adapter instanceof DeepSeekAdapter)) throw new WorkbenchError('unsupported_version', 'DeepSeek Harness 适配器不可用');
   return adapter.importSession(project.path, input.filePath);
 }

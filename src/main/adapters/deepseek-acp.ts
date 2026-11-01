@@ -11,10 +11,12 @@ export class DeepSeekAcpProtocol {
   private readonly pending = new Map<number, Pending>();
   private exited = false;
   private notificationHandler: ((message: AcpNotification) => void) | undefined;
+  private requestHandler: ((method: string, params?: unknown) => Promise<unknown>) | undefined;
 
   constructor(private readonly send: (line: string) => void, private readonly timeoutMs = 10000) {}
 
   onNotification(handler: (message: AcpNotification) => void): void { this.notificationHandler = handler; }
+  onRequest(handler: (method: string, params?: unknown) => Promise<unknown>): void { this.requestHandler = handler; }
 
   request(method: string, params?: unknown, timeoutMs = this.timeoutMs): Promise<unknown> {
     if (this.exited) return Promise.reject(new WorkbenchError('process_failed', 'DeepSeek Harness ACP 进程已退出'));
@@ -48,8 +50,18 @@ export class DeepSeekAcpProtocol {
     } catch { return; } // Some dsh releases print a non-protocol account log to stdout.
     if (frame.jsonrpc !== '2.0') return;
     if (typeof frame.method === 'string' && frame.id !== undefined) {
-      // Until Agent Home has a permission review UI, decline every request.
-      this.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: { outcome: { outcome: 'cancelled' } } }));
+      const cancelled = { outcome: { outcome: 'cancelled' } };
+      const reply = (result: unknown) => {
+        try { this.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result })); }
+        catch { /* The ACP process may have exited while the user decided. */ }
+      };
+      if (!this.requestHandler) {
+        reply(cancelled);
+      } else {
+        void this.requestHandler(frame.method, frame.params)
+          .then(reply)
+          .catch(() => reply(cancelled));
+      }
       return;
     }
     if (typeof frame.id === 'number') {
@@ -78,6 +90,7 @@ export interface DeepSeekConnection {
   request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
   notify(method: string, params?: unknown): void;
   onNotification(handler: (message: AcpNotification) => void): void;
+  onRequest(handler: (method: string, params?: unknown) => Promise<unknown>): void;
   close(): void;
 }
 
@@ -107,6 +120,7 @@ export async function connectDeepSeek(cwd: string): Promise<DeepSeekConnection> 
       request: (method, params, timeoutMs) => protocol.request(method, params, timeoutMs),
       notify: (method, params) => protocol.notify(method, params),
       onNotification: handler => protocol.onNotification(handler),
+      onRequest: handler => protocol.onRequest(handler),
       close,
     };
   } catch (error) { close(); throw error; }

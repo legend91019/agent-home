@@ -30,6 +30,10 @@ export async function handle(
       return projects.listSessions(ctx, input);
     case "workbuddy.importSession":
       return projects.importWorkBuddySession(ctx, input);
+    case "deepseek.pickExport":
+      return projects.pickDeepSeekExport();
+    case "deepseek.importSession":
+      return projects.importDeepSeekSession(ctx, input);
     case "config.scan":
       return config.scanConfig(ctx, input);
     case "config.previewPublish":
@@ -66,6 +70,8 @@ export async function handle(
       return tasks.startRun(ctx, input);
     case "tasks.interrupt":
       return tasks.interruptRun(ctx, input);
+    case "tasks.permission":
+      return tasks.respondPermission(ctx, input);
     case "tasks.state":
       return tasks.runState(ctx, input);
     case "workflow.start":

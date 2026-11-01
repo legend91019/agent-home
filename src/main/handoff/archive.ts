@@ -47,7 +47,7 @@ export async function archiveSession(
     projectId,
     session.agentId,
     session.id,
-    session.messageCount > 0 ? session.messageCount : null,
+    session.historyFidelity === "text-only" ? null : session.messageCount > 0 ? session.messageCount : null,
     `${handoffId}.json`,
     new Date().toISOString(),
   );

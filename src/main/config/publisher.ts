@@ -167,7 +167,9 @@ export class ConfigPublisher {
       if (agent === 'workbuddy')
         return path.join(root, '.codebuddy', 'skills', artifact.name);
       if (agent === 'deepseek-harness')
-        return path.join(root, '.dsh', 'skills', artifact.name);
+        return artifact.sourcePath && within(path.join(root, '.agents', 'skills'), artifact.sourcePath)
+          ? artifact.sourcePath
+          : path.join(root, '.dsh', 'skills', artifact.name);
       return null;
     }
     if (artifact.kind === 'workflow')

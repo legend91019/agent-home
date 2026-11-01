@@ -62,7 +62,7 @@ export function createContext(
     adapters.register(new AntigravityAdapter());
     adapters.register(new ZCodeAdapter());
     adapters.register(new WorkBuddyAdapter({ dataDir }));
-    adapters.register(new DeepSeekAdapter());
+    adapters.register(new DeepSeekAdapter({ dataDir, blobs }));
   }
 
   const config = new ConfigInventory(db);

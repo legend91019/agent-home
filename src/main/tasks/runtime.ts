@@ -242,6 +242,16 @@ export class TaskRuntime {
     return row ? this.buildRunDto(row) : null;
   }
 
+  respondPermission(runId: string, toolCallId: string, optionId: string | null): { ok: boolean } {
+    const run = this.getRun(runId);
+    if (!run || run.agentId !== 'deepseek-harness') throw new WorkbenchError('invalid_data', 'dsh Run 不存在');
+    const handle = this.liveHandles.get(runId);
+    const adapter = this.adapters.get(run.agentId);
+    if (!handle || !adapter.respondPermission) throw new WorkbenchError('session_unavailable', 'dsh 运行已结束');
+    adapter.respondPermission(handle, toolCallId, optionId);
+    return { ok: true };
+  }
+
   setRunStatus(runId: string, status: RunStatus): void {
     const row = this.db.getRow("SELECT status FROM runs WHERE id = ?", runId);
     if (!row) throw new WorkbenchError("invalid_data", `未知 Run: ${runId}`);
@@ -334,12 +344,16 @@ export class TaskRuntime {
 
   private buildRunDto(row: Record<string, unknown>): RunDTO {
     const r = row as unknown as RunRow;
+    const handle = this.liveHandles.get(String(r.id));
+    const permissionRequest = handle && r.status === 'running'
+      ? this.adapters.get(r.agent_id as AgentId).pendingPermission?.(handle) ?? undefined
+      : undefined;
     return {
       id: String(r.id),
       taskId: String(r.task_id),
       agentId: r.agent_id as AgentId,
       nativeSessionId: r.native_session_id ?? undefined,
-      status: r.status as RunStatus,
+      status: permissionRequest ? 'waiting_for_user' : r.status as RunStatus,
       createdAt: String(r.created_at),
       updatedAt: String(r.updated_at),
       workspaceId: r.workspace_id ?? undefined,
@@ -348,6 +362,7 @@ export class TaskRuntime {
         Number(r.controllable) === 1 &&
         (r.status === "running" || r.status === "waiting_for_user") &&
         this.liveHandles.has(String(r.id)),
+      permissionRequest,
     };
   }
 

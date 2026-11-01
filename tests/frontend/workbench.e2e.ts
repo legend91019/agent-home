@@ -9,6 +9,9 @@ test.beforeEach(async ({ page }) => {
     let workflow: any;
     let conflict = true;
     let workbuddyImported = false;
+    let deepseekImported = false;
+    let permissionPending = false;
+    (window as any).enableDshPermission = () => { permissionPending = true; };
     (window as any).calls = [];
     (window as any).api = new Proxy({}, { get: (_, channel) => async (input: any) => {
       (window as any).calls.push({channel,input});
@@ -22,8 +25,10 @@ test.beforeEach(async ({ page }) => {
         {artifactId:'skill-2',kind:'skill',sourcePath:'D:/test/skill/SKILL.md',path:'D:/test/.agents/skills/skill/SKILL.md',status:'new',publishable:false,reason:'来源不安全'},
       ]};
       if(channel==='config.publish') return {id:'receipt-1',diffId:input.diffId,appliedChoices:input.choices};
-      if(channel==='sessions.list') return input.agentId==='workbuddy' ? (workbuddyImported ? [{agentId:'workbuddy',id:'import-1',title:'WorkBuddy 导入会话',messageCount:2}] : []) : [session];
+      if(channel==='sessions.list') return input.agentId==='workbuddy' ? (workbuddyImported ? [{agentId:'workbuddy',id:'import-1',title:'WorkBuddy 导入会话',messageCount:2}] : []) : input.agentId==='deepseek-harness' ? [{agentId:'deepseek-harness',id:'native-dsh',title:'dsh 会话（需导入历史）',messageCount:0,historyFidelity:'unavailable'}, ...(deepseekImported ? [{agentId:'deepseek-harness',id:'import-dsh',title:'dsh 导入会话',messageCount:2,historyFidelity:'structured',nativeSourceSessionId:'native-dsh'}] : [])] : [session];
       if(channel==='workbuddy.importSession'){workbuddyImported=true;return {agentId:'workbuddy',id:'import-1',title:'WorkBuddy 导入会话',messageCount:2};}
+      if(channel==='deepseek.pickExport') return 'D:/exports/dsh-session.zip';
+      if(channel==='deepseek.importSession'){deepseekImported=true;return {agentId:'deepseek-harness',id:'import-dsh',historyFidelity:'structured'};}
       if(channel==='handoff.create') return {id:'handoff-1'};
       if(channel==='handoff.integrity') return {readCount:1,sourceCount:1,complete:true,missing:[],largeAttachments:[],sessionRef:session};
       if(channel==='handoff.summary') return {id:'handoff-1',projectId:'p1',consumed:false};
@@ -31,8 +36,9 @@ test.beforeEach(async ({ page }) => {
       if(channel==='handoff.findings') return edited?[]:[{eventIndex:0,field:'text',kind:'secret',snippet:'请检查密码字段'}];
       if(channel==='handoff.edit'){edited=true;removed=input.edits.some((e:any)=>e.text===null);return {id:'handoff-1'}};
       if(channel==='handoff.consume') return run;
-      if(channel==='tasks.list') return [{id:'task-1',title:'可中断任务',goal:'测试',status:interrupted?'cancelled':'running',runs:[run,{...run,id:'run-2',controllable:false}]}];
+      if(channel==='tasks.list') return [{id:'task-1',title:'可中断任务',goal:'测试',status:interrupted?'cancelled':'running',runs:[run,{...run,id:'run-2',controllable:false}, ...(permissionPending ? [{id:'dsh-run',taskId:'task-1',agentId:'deepseek-harness',status:'waiting_for_user',controllable:true,permissionRequest:{toolCallId:'edit',title:'Edit file',inputSummary:'{"path":"a.ts"}',options:[{optionId:'allow-once',name:'Allow once',kind:'allow_once'}]}}] : [])]}];
       if(channel==='tasks.interrupt'){interrupted=true;return {ok:true}}
+      if(channel==='tasks.permission'){permissionPending=false;return {ok:true}}
       if(channel==='tasks.startRun') throw {code:'not_authenticated',message:'请先登录'};
       if(channel==='memory.list') return [{id:'native:one',agentId:'claude-code',projectId:'p1',source:'D:/test/CLAUDE.md',originalText:'保存项目约定',scope:'project',published:false}];
       if(channel==='memory.previewTransfer') return {id:'memory-diff',entryIds:input.entryIds,targetAgentId:input.targetAgentId,destination:input.destination,nativeWriteSupported:false,previewText:'[CLAUDE.md] 保存项目约定'};
@@ -100,6 +106,31 @@ test('WorkBuddy 会话由用户指定文件后出现在当前项目列表', asyn
   await expect(page.getByLabel('源会话')).toContainText('WorkBuddy 导入会话');
   const calls=await page.evaluate(()=>(window as any).calls);
   expect(calls.find((c:any)=>c.channel==='workbuddy.importSession').input).toEqual({projectId:'p1',filePath:'D:/exports/conversation.json'});
+});
+
+test('dsh 原生会话需先导入官方导出才能交接', async ({page}) => {
+  await page.getByRole('button',{name:'对话交接',exact:true}).click();
+  await page.getByLabel('源 Agent').selectOption('deepseek-harness');
+  await page.getByLabel('源会话').selectOption('native-dsh');
+  await expect(page.getByRole('button',{name:'创建交接包'})).toBeDisabled();
+  await page.getByRole('button',{name:'选择文件'}).click();
+  await expect(page.getByLabel('DeepSeek Harness 导出路径')).toHaveValue('D:/exports/dsh-session.zip');
+  await page.getByRole('button',{name:'导入 dsh 会话'}).click();
+  await expect(page.getByLabel('源会话')).toContainText('dsh 导入会话');
+  await page.getByLabel('源会话').selectOption('import-dsh');
+  await expect(page.getByRole('button',{name:'创建交接包'})).toBeEnabled();
+  const calls=await page.evaluate(()=>(window as any).calls);
+  expect(calls.find((c:any)=>c.channel==='deepseek.importSession').input).toEqual({projectId:'p1',filePath:'D:/exports/dsh-session.zip'});
+});
+
+test('dsh 工具权限由用户在任务页明确批准', async ({page}) => {
+  await page.evaluate(() => (window as any).enableDshPermission());
+  await page.getByRole('button',{name:'任务',exact:true}).click();
+  await expect(page.getByText('DeepSeek Harness 请求授权：Edit file')).toBeVisible();
+  await expect(page.getByText('{"path":"a.ts"}')).toBeVisible();
+  await page.getByRole('button',{name:'Allow once'}).click();
+  const calls=await page.evaluate(()=>(window as any).calls);
+  expect(calls.find((c:any)=>c.channel==='tasks.permission').input).toEqual({runId:'dsh-run',toolCallId:'edit',optionId:'allow-once'});
 });
 
 test('任务正确区分不可中断运行，并显示启动错误', async ({page}) => {

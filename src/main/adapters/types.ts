@@ -11,6 +11,7 @@ import {
   CapabilityStatus,
   SessionRef,
   VisibleEvent,
+  RunDTO,
 } from "../../shared/contracts";
 import { WorkbenchError } from "../../shared/errors";
 
@@ -62,6 +63,8 @@ export interface AgentAdapter {
 
   /** 可选：等待当前原生运行进入终态，用于同步面板任务状态 */
   waitForCompletion?(handle: RunHandle): Promise<"succeeded" | "failed" | "cancelled">;
+  pendingPermission?(handle: RunHandle): RunDTO['permissionRequest'] | null;
+  respondPermission?(handle: RunHandle, toolCallId: string, optionId: string | null): void;
 }
 
 export abstract class BaseAdapter implements AgentAdapter {

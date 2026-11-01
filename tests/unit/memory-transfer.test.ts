@@ -99,9 +99,10 @@ describe("MemoryInventory + MemoryTransfer", () => {
   });
   it("DeepSeek Harness 的 AGENTS.md 可作为记忆来源", () => {
     fs.writeFileSync(path.join(dir, "AGENTS.md"), "dsh project rules", "utf8");
+    fs.writeFileSync(path.join(dir, "CLAUDE.md"), "shared project rules", "utf8");
     const source = inventory.listVisibleMemories("p1", "deepseek-harness");
-    expect(source).toHaveLength(1);
-    expect(source[0]).toMatchObject({ agentId: "deepseek-harness", originalText: "dsh project rules" });
+    expect(source).toHaveLength(2);
+    expect(source.map(entry => entry.originalText)).toEqual(["dsh project rules", "shared project rules"]);
     expect(inventory.getEntry(source[0].id)?.agentId).toBe("deepseek-harness");
   });
 

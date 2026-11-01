@@ -322,6 +322,12 @@ function TasksView(props: { projectId: string; disabled: boolean }): JSX.Element
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
+  const decidePermission = async (runId: string, toolCallId: string, optionId: string | null) => {
+    setBusy(true); setError("");
+    try { await call("tasks.permission", { runId, toolCallId, optionId }); await load(); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
 
   if (props.disabled)
     return <div>请先在「项目」中选择一个项目。</div>;
@@ -364,6 +370,12 @@ function TasksView(props: { projectId: string; disabled: boolean }): JSX.Element
             <div key={r.id} style={{ fontSize: 12, color: "#9399b2", marginTop: 4 }}>
               Run {r.id.slice(0, 8)} · {r.agentId} · {r.status}
               {["starting", "running", "waiting_for_user"].includes(r.status) ? r.controllable ? <button style={btn} disabled={busy} onClick={() => interrupt(r.id)}>中断运行</button> : " · 当前不支持中断" : " · 已结束"}
+              {r.permissionRequest && <div style={{ ...card, marginTop: 8, color: "#f5c2e7" }}>
+                <div>DeepSeek Harness 请求授权：{r.permissionRequest.title || r.permissionRequest.toolCallId}</div>
+                {r.permissionRequest.inputSummary && <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{r.permissionRequest.inputSummary}</pre>}
+                {r.permissionRequest.options.map((option) => <button key={option.optionId} style={btn} disabled={busy} onClick={() => decidePermission(r.id, r.permissionRequest!.toolCallId, option.optionId)}>{option.name}</button>)}
+                <button style={btn} disabled={busy} onClick={() => decidePermission(r.id, r.permissionRequest!.toolCallId, null)}>取消本次请求</button>
+              </div>}
             </div>
           ))}
         </div>
@@ -377,6 +389,7 @@ function TasksView(props: { projectId: string; disabled: boolean }): JSX.Element
 function HandoffsView(props: { projectId: string; disabled: boolean }): JSX.Element {
   const [source, setSource] = useState<AgentId>("claude-code");
   const [workbuddyFile, setWorkbuddyFile] = useState("");
+  const [deepseekFile, setDeepseekFile] = useState("");
   const [sessions, setSessions] = useState<SessionRef[]>([]);
   const [sessionId, setSessionId] = useState("");
   const [id, setId] = useState("");
@@ -435,6 +448,16 @@ function HandoffsView(props: { projectId: string; disabled: boolean }): JSX.Elem
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
+  const importDeepSeek = async () => {
+    setBusy(true); setError(""); setResult("");
+    try {
+      const imported = await call("deepseek.importSession", { projectId: props.projectId, filePath: deepseekFile.trim() });
+      setDeepseekFile("");
+      setSessionRefresh((count) => count + 1);
+      setResult(imported.historyFidelity === "text-only" ? "dsh 文本历史已导入；角色结构和附件信息有限，请审查原文。" : "dsh 结构化历史已导入；请从源会话列表中选择并审查。");
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
   const consume = async () => {
     if (!id || !reviewed || !report) return;
     setBusy(true); setError(""); setResult("");
@@ -468,12 +491,18 @@ function HandoffsView(props: { projectId: string; disabled: boolean }): JSX.Elem
         <input aria-label="WorkBuddy 会话文件路径" style={{ ...inputStyle, minWidth: 360 }} value={workbuddyFile} disabled={busy} onChange={(e) => setWorkbuddyFile(e.target.value)} placeholder="D:/exports/conversation.json" />
         <button style={btn} disabled={busy || !workbuddyFile.trim()} onClick={importWorkBuddy}>导入 WorkBuddy 会话</button>
       </div>}
+      {source === "deepseek-harness" && <div style={{ marginTop: 12 }}>
+        <p>ACP 不回放历史。请在 dsh Web 会话菜单下载完整 ZIP；也可复制会话 Markdown 保存为 .md 后导入。仅在你点击导入后读取文件。</p>
+        <input aria-label="DeepSeek Harness 导出路径" style={{ ...inputStyle, minWidth: 360 }} value={deepseekFile} disabled={busy} onChange={(e) => setDeepseekFile(e.target.value)} placeholder="D:/exports/dsh-session.zip" />
+        <button style={btn} disabled={busy} onClick={async () => { try { const file = await call("deepseek.pickExport", undefined); if (file) setDeepseekFile(file); } catch (e) { setError(e instanceof Error ? e.message : String(e)); } }}>选择文件</button>
+        <button style={btn} disabled={busy || !deepseekFile.trim()} onClick={importDeepSeek}>导入 dsh 会话</button>
+      </div>}
       <label>源会话 <select aria-label="源会话" style={{ ...inputStyle, maxWidth: 420 }} value={sessionId} disabled={busy} onChange={(e) => { setSessionId(e.target.value); setId(""); setReport(null); setEvents([]); setReviewed(false); setResult(""); }}>
         <option value="">请选择会话</option>
-        {sessions.map((s) => <option key={s.id} value={s.id}>{s.title || s.id} · {s.messageCount} 条</option>)}
+        {sessions.map((s) => <option key={s.id} value={s.id}>{s.title || s.id} · {s.messageCount} 条{s.nativeSourceSessionId ? ` · 源 ${s.nativeSourceSessionId}` : ""}{s.historyFidelity === "text-only" ? " · 文本转录" : s.historyFidelity === "unavailable" ? " · 需导入" : ""}</option>)}
       </select></label>
       <button style={btn} disabled={busy} onClick={() => setSessionRefresh((n) => n + 1)}>刷新会话</button>
-      <button style={btn} disabled={busy || !sessionId} onClick={create}>创建交接包</button>
+      <button style={btn} disabled={busy || !sessionId || sessions.find(s => s.id === sessionId)?.historyFidelity === "unavailable"} onClick={create}>创建交接包</button>
       {sessions.length === 0 && <p>此 Agent 当前没有可读取的项目会话；可刷新或选择其他源 Agent。</p>}
     </div>
     <details style={card}><summary>打开已有交接包</summary>

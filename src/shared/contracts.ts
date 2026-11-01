@@ -111,6 +111,9 @@ export interface SessionRef {
   startedAt?: string;
   updatedAt?: string;
   nativeProjectPath?: string;
+  /** 导入历史的结构完整度；原生会话若不支持回放则为 unavailable。 */
+  historyFidelity?: "structured" | "text-only" | "unavailable";
+  nativeSourceSessionId?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -163,6 +166,12 @@ export interface RunDTO {
   handoffId?: string;
   /** 由工作台管理且适配器声明支持时，控制按钮才可用 */
   controllable: boolean;
+  permissionRequest?: {
+    toolCallId: string;
+    title?: string;
+    inputSummary?: string;
+    options: { optionId: string; name: string; kind: string }[];
+  };
 }
 
 export interface TaskDTO {
@@ -448,6 +457,8 @@ export interface IpcContract {
   "projects.capabilities": { input: { projectId: string }; output: CapabilityReport[] };
   "sessions.list": { input: { projectId: string; agentId: AgentId }; output: SessionRef[] };
   "workbuddy.importSession": { input: { projectId: string; filePath: string }; output: SessionRef };
+  "deepseek.pickExport": { input: void; output: string | null };
+  "deepseek.importSession": { input: { projectId: string; filePath: string }; output: SessionRef };
   "config.scan": { input: { projectId: string }; output: SharedArtifactDTO[] };
   "config.previewPublish": {
     input: { projectId: string; targetAgentId: AgentId };
@@ -493,6 +504,7 @@ export interface IpcContract {
     output: RunDTO;
   };
   "tasks.interrupt": { input: { runId: string }; output: { ok: boolean } };
+  "tasks.permission": { input: { runId: string; toolCallId: string; optionId: string | null }; output: { ok: boolean } };
   "tasks.state": { input: { runId: string }; output: RunDTO };
   "workflow.start": { input: { taskId: string; definition: WorkflowDef }; output: WorkflowRunDTO };
   "workflow.get": { input: { workflowRunId: string }; output: WorkflowRunDTO | null };
@@ -520,6 +532,8 @@ export const IPC_CHANNELS = [
   "projects.capabilities",
   "sessions.list",
   "workbuddy.importSession",
+  "deepseek.pickExport",
+  "deepseek.importSession",
   "config.scan",
   "config.previewPublish",
   "config.publish",
@@ -538,6 +552,7 @@ export const IPC_CHANNELS = [
   "tasks.create",
   "tasks.startRun",
   "tasks.interrupt",
+  "tasks.permission",
   "tasks.state",
   "workflow.start",
   "workflow.get",

@@ -104,6 +104,15 @@ describe('ConfigPublisher safe publication', () => {
     expect(read('.agents/skills/my-skill/SKILL.md')).toBe('skill body');
     expect(db.getRows('SELECT * FROM publications')).toHaveLength(0);
   });
+  it('does not duplicate a dsh-readable .agents skill into .dsh', () => {
+    skill('.agents/skills/my-skill');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'deepseek-harness');
+    const e = entry(d, 'my-skill');
+    expect(e.path).toBe(path.join(dir, '.agents/skills/my-skill'));
+    p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    expect(fs.existsSync(path.join(dir, '.dsh/skills/my-skill'))).toBe(false);
+  });
   it('publishes a selected rule to WorkBuddy project instructions and restores the previous bytes', () => {
     write('CLAUDE.md', 'shared guidance');
     write('CODEBUDDY.md', 'existing WorkBuddy guidance');

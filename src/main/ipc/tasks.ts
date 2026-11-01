@@ -30,6 +30,13 @@ export async function interruptRun(
   return ctx.tasks.interruptRun(input.runId);
 }
 
+export async function respondPermission(
+  ctx: AppContext,
+  input: { runId: string; toolCallId: string; optionId: string | null },
+): Promise<{ ok: boolean }> {
+  return ctx.tasks.respondPermission(input.runId, input.toolCallId, input.optionId);
+}
+
 export async function runState(
   ctx: AppContext,
   input: { runId: string },
