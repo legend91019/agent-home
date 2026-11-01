@@ -12,6 +12,7 @@ import { CodexAdapter } from "./adapters/codex";
 import { AntigravityAdapter } from "./adapters/antigravity";
 import { ZCodeAdapter } from "./adapters/zcode";
 import { WorkBuddyAdapter } from "./adapters/workbuddy";
+import { DeepSeekAdapter } from "./adapters/deepseek";
 import { ConfigInventory } from "./config/inventory";
 import { ConfigPublisher } from "./config/publisher";
 import { MemoryInventory } from "./memory/inventory";
@@ -61,6 +62,7 @@ export function createContext(
     adapters.register(new AntigravityAdapter());
     adapters.register(new ZCodeAdapter());
     adapters.register(new WorkBuddyAdapter({ dataDir }));
+    adapters.register(new DeepSeekAdapter());
   }
 
   const config = new ConfigInventory(db);
