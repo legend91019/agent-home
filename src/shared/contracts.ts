@@ -9,7 +9,7 @@ import type { StructuredErrorCode } from "./errors";
 /* 适配器与能力协商                                                    */
 /* ------------------------------------------------------------------ */
 
-export type AgentId = "claude-code" | "codex" | "antigravity" | "zcode" | "workbuddy";
+export type AgentId = "claude-code" | "codex" | "antigravity" | "zcode" | "workbuddy" | "deepseek-harness";
 
 export const AGENT_LABELS: Record<AgentId, string> = {
   "claude-code": "Claude Code",
@@ -17,6 +17,7 @@ export const AGENT_LABELS: Record<AgentId, string> = {
   antigravity: "Antigravity",
   zcode: "ZCode",
   workbuddy: "Tencent WorkBuddy",
+  "deepseek-harness": "DeepSeek Harness",
 };
 
 export type Capability =

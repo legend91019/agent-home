@@ -17,10 +17,19 @@ function nativeMemoryPaths(projectPath: string, agentId: AgentId): string[] {
   if (agentId === "codex") {
     return [path.join(projectPath, "AGENTS.md")];
   }
+  if (agentId === "deepseek-harness") {
+    return [path.join(projectPath, "AGENTS.md")];
+  }
   if (agentId === "workbuddy") {
     return [path.join(projectPath, "CODEBUDDY.md")];
   }
   return [];
+}
+
+function nativeId(source: string, agentId: AgentId): string {
+  // Codex and dsh share AGENTS.md, but their memory entries have distinct provenance.
+  const identity = agentId === "deepseek-harness" ? `${agentId}\0${source}` : source;
+  return "native:" + crypto.createHash("sha256").update(identity).digest("hex");
 }
 
 export class MemoryInventory {
@@ -40,7 +49,7 @@ export class MemoryInventory {
         try {
           if (fs.existsSync(p) && fs.statSync(p).isFile()) {
             const text = fs.readFileSync(p, "utf8");
-            const id = "native:" + crypto.createHash("sha256").update(p).digest("hex");
+            const id = nativeId(p, agentId);
             bySource.set(p, {
               id,
               agentId,
@@ -114,10 +123,9 @@ export class MemoryInventory {
     if (row) return this.rowToDto(row);
     if (!id.startsWith("native:")) return null;
     for (const project of this.registry.listProjects()) {
-      for (const agentId of ["claude-code", "codex", "workbuddy"] as const) {
+      for (const agentId of ["claude-code", "codex", "workbuddy", "deepseek-harness"] as const) {
         for (const source of nativeMemoryPaths(project.path, agentId)) {
-          const nativeId = "native:" + crypto.createHash("sha256").update(source).digest("hex");
-          if (nativeId !== id) continue;
+          if (nativeId(source, agentId) !== id) continue;
           try {
             if (!fs.statSync(source).isFile()) return null;
             return {

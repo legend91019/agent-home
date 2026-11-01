@@ -52,6 +52,7 @@ const AGENTS: AgentId[] = [
   "antigravity",
   "zcode",
   "workbuddy",
+  "deepseek-harness",
 ];
 
 const panel: React.CSSProperties = {

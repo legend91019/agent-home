@@ -73,7 +73,7 @@ describe('ConfigPublisher safe publication', () => {
     expect(() => p.publish(d.id, { [e.artifactId]: 'manual-merge' })).toThrow(/人工合并|合并结果/);
     expect(read('AGENTS.md')).toBe('native');
   });
-  it.each([['claude-code', '.claude'], ['codex', '.agents'], ['workbuddy', '.codebuddy']] as const)('publishes %s skills into the documented project path', (agent, folder) => {
+  it.each([['claude-code', '.claude'], ['codex', '.agents'], ['workbuddy', '.codebuddy'], ['deepseek-harness', '.dsh']] as const)('publishes %s skills into the documented project path', (agent, folder) => {
     skill();
     const p = new ConfigPublisher(db);
     const d = p.previewPublish('p1', agent);
@@ -82,6 +82,18 @@ describe('ConfigPublisher safe publication', () => {
     p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
     expect(read(`${folder}/skills/my-skill/SKILL.md`)).toBe('skill body');
     expect(read(`${folder}/skills/my-skill/assets/icon.png`)).toBe('resource bytes');
+  });
+  it('publishes dsh rules to AGENTS.md and restores original content', () => {
+    write('CLAUDE.md', 'shared dsh guidance');
+    write('AGENTS.md', 'existing guidance');
+    const p = new ConfigPublisher(db);
+    const d = p.previewPublish('p1', 'deepseek-harness');
+    const e = entry(d, 'CLAUDE.md');
+    expect(e.path).toBe(path.join(dir, 'AGENTS.md'));
+    const receipt = p.publish(d.id, { [e.artifactId]: 'overwrite-with-shared' });
+    expect(read('AGENTS.md')).toBe('shared dsh guidance');
+    new ConfigPublisher(db).rollback(receipt.id);
+    expect(read('AGENTS.md')).toBe('existing guidance');
   });
   it('same source and native skill is a harmless no-op', () => {
     skill('.agents/skills/my-skill');
