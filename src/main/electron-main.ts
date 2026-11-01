@@ -13,6 +13,7 @@ import { createContext } from "./services";
 import { handle } from "./ipc";
 import { IPC_CHANNELS, IpcChannel } from "../shared/contracts";
 import { WorkbenchError, toWorkbenchError } from "../shared/errors";
+import { sameRendererUrl } from "./renderer-origin";
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -50,7 +51,7 @@ function createWindow(): void {
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (url !== trustedRendererUrl) event.preventDefault();
+    if (!sameRendererUrl(url, trustedRendererUrl)) event.preventDefault();
   });
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     trustedRendererUrl = MAIN_WINDOW_VITE_DEV_SERVER_URL;
@@ -71,7 +72,8 @@ function registerIpc(): void {
   for (const channel of IPC_CHANNELS) {
     ipcMain.handle(channel, async (event, input: unknown) => {
       try {
-        if (event.sender !== mainWindow?.webContents || event.senderFrame?.url !== trustedRendererUrl) {
+        if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow?.webContents.mainFrame ||
+            !sameRendererUrl(event.senderFrame.url, trustedRendererUrl)) {
           throw new WorkbenchError("permission_denied", "IPC 请求不来自工作台窗口");
         }
         return await handle(ctx, channel as IpcChannel, input);
